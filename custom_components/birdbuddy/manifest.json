@@ -18,9 +18,9 @@
   ],
   "requirements": [
     "python-graphql-client==0.4.3",
-    "pybirdbuddy @ https://github.com/oliviacpu/pybirdbuddy/releases/download/v0.1.1-google.1/pybirdbuddy-0.1.1%2Bgoogle.1-py3-none-any.whl"
+    "pybirdbuddy@https://github.com/oliviacpu/pybirdbuddy/releases/download/v0.1.1-google.1/pybirdbuddy-0.1.1%2Bgoogle.1-py3-none-any.whl"
   ],
   "ssdp": [],
-  "version": "0.1.1",
+  "version": "0.1.2",
   "zeroconf": []
 }
