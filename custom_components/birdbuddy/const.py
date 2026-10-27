@@ -7,6 +7,11 @@ from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
 
 DOMAIN = "birdbuddy"
+CONF_AUTH_METHOD = "auth_method"
+CONF_REFRESH_TOKEN = "refresh_token"
+CONF_USER_ID = "user_id"
+AUTH_EMAIL = "email"
+AUTH_GOOGLE = "google"
 LOGGER = logging.getLogger(__package__)
 MANUFACTURER = "Bird Buddy, Inc."
 

@@ -6,6 +6,8 @@ from typing import Any
 
 from birdbuddy.client import BirdBuddy
 from birdbuddy.exceptions import (
+    AuthenticationFailedError,
+    AuthTokenExpiredError,
     CompositeException,
     GraphqlError,
     UnexpectedResponseError,
@@ -15,6 +17,7 @@ from birdbuddy.feeder import Feeder
 from birdbuddy.media import Collection
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, EventOrigin, HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -61,6 +64,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         super().__init__(
             hass,
             LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=POLLING_INTERVAL,
         )
@@ -164,6 +168,9 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             if not self.first_update:
                 feed = await self.client.refresh_feed()
                 await self._process_feed(feed)
+        except (AuthenticationFailedError, AuthTokenExpiredError) as exc:
+            msg = "Bird Buddy sign-in must be renewed"
+            raise ConfigEntryAuthFailed(msg) from exc
         except Exception as exc:
             raise UpdateFailed(exc) from exc
 

@@ -1,14 +1,14 @@
 {
     "config": {
         "abort": {
-            "already_configured": "Ger\u00e4t ist bereits konfiguriert"
+            "already_configured": "Gerät ist bereits konfiguriert"
         },
         "error": {
             "cannot_connect": "Verbindung fehlgeschlagen",
-            "invalid_auth": "Ung\u00fcltige Authentifizierung"
+            "invalid_auth": "Ungültige Authentifizierung"
         },
         "step": {
-            "user": {
+            "email": {
                 "data": {
                     "email": "Email",
                     "password": "Passwort"
@@ -36,15 +36,15 @@
             "feeder_state": {
                 "state": {
                     "deep_sleep": "Schlafend",
-                    "factory_reset": "Zur\u00fccksetzen auf Werkseinstellung",
+                    "factory_reset": "Zurücksetzen auf Werkseinstellung",
                     "firmware_update": "Aktualisierung der Firmware",
                     "off_grid": "Vom Netz getrennt",
                     "offline": "Offline",
                     "online": "Online",
-                    "out_of_feeder": "Aus dem Vogelf\u00fctterer",
-                    "pending_factory_reset": "Werksr\u00fcckstellung steht an",
+                    "out_of_feeder": "Aus dem Vogelfütterer",
+                    "pending_factory_reset": "Werksrückstellung steht an",
                     "pending_removal": "Ausstehende Entnahme",
-                    "ready_to_stream": "Bereit f\u00fcr Besuch",
+                    "ready_to_stream": "Bereit für Besuch",
                     "streaming": "Streaming",
                     "taking_postcards": "Fotos machen",
                     "unknown": "Unbekannt"

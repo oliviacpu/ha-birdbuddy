@@ -1,19 +1,49 @@
 {
     "config": {
         "abort": {
-            "already_configured": "Device is already configured"
+            "already_configured": "Device is already configured",
+            "missing_credentials": "Add a Google OAuth client ID and client secret in Application Credentials, then try again.",
+            "missing_configuration": "Configure Google OAuth application credentials first.",
+            "wrong_account": "Sign in with the Bird Buddy account already configured for this integration.",
+            "reauth_successful": "Bird Buddy sign-in renewed.",
+            "user_rejected_authorize": "Google authorization was cancelled. Add the integration again to retry.",
+            "cannot_connect": "Could not connect to Bird Buddy. Try again.",
+            "oauth_implementation_unavailable": "Google OAuth credentials are unavailable. Check Application Credentials.",
+            "authorize_url_timeout": "Google authorization could not be started. Try again.",
+            "no_url_available": "Configure a Home Assistant URL before signing in."
         },
         "error": {
             "cannot_connect": "Failed to connect",
             "invalid_auth": "Invalid authentication"
         },
         "step": {
-            "user": {
+            "email": {
                 "data": {
                     "email": "Email",
                     "password": "Password"
                 },
                 "title": "Fill in your Bird Buddy login credentials"
+            },
+            "user": {
+                "title": "Sign in to Bird Buddy",
+                "menu_options": {
+                    "google": "Sign in with Google",
+                    "email": "Sign in with email and password"
+                }
+            },
+            "google": {
+                "title": "Sign in with Google",
+                "description": "Try again to restart Google authorization. Use the Google account linked to your existing Bird Buddy account."
+            },
+            "pick_implementation": {
+                "title": "Google OAuth credentials",
+                "data": {
+                    "implementation": "OAuth client"
+                }
+            },
+            "reauth_confirm": {
+                "title": "Renew Bird Buddy sign-in",
+                "description": "Sign in again to reconnect your existing Bird Buddy account."
             }
         }
     },
@@ -77,5 +107,8 @@
             "description": "An automation or script still triggers on `{legacy_event}`, which this integration replaced with `{event}`. Update those triggers to `{event}`, whose payload carries `postcard_id`, `feeder_id`, `species` and `media`. Automations built on the \"A new postcard is ready\" device trigger continue to work and need no change.",
             "title": "Automation uses a renamed Bird Buddy event"
         }
+    },
+    "application_credentials": {
+        "description": "Create a Web application OAuth client in [Google Cloud]({console_url}). Add the redirect URL shown by Home Assistant to its authorized redirect URIs. Request only email identity access. Your Bird Buddy account must already be linked to Google."
     }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from birdbuddy.auth import AuthTokens
 from birdbuddy.client import BirdBuddy
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
@@ -12,6 +13,10 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     ATTR_FEEDER_ID,
+    AUTH_EMAIL,
+    AUTH_GOOGLE,
+    CONF_AUTH_METHOD,
+    CONF_REFRESH_TOKEN,
     DOMAIN,
     LOGGER,
     SERVICE_COLLECT_POSTCARD,
@@ -61,7 +66,24 @@ async def async_setup_entry(
         True once the coordinator and platforms are set up.
     """
     hass.data.setdefault(DOMAIN, {})
-    client = BirdBuddy(entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+
+    async def save_tokens(tokens: AuthTokens) -> None:
+        """Keep the rotated Bird Buddy refresh token with the config entry."""
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REFRESH_TOKEN: tokens.refresh_token}
+        )
+
+    if entry.data.get(CONF_AUTH_METHOD) == AUTH_GOOGLE:
+        client = BirdBuddy(
+            refresh_token=entry.data[CONF_REFRESH_TOKEN], tokens_updated=save_tokens
+        )
+    else:
+        client = BirdBuddy(
+            entry.data[CONF_EMAIL],
+            entry.data[CONF_PASSWORD],
+            refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+            tokens_updated=save_tokens,
+        )
     client.language_code = hass.config.language
     coordinator = BirdBuddyDataUpdateCoordinator(hass, client, entry)
 
@@ -73,6 +95,17 @@ async def async_setup_entry(
         PLATFORMS,
     )
 
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Retain password entries and their entity identities when upgrading."""
+    if entry.version > 2:
+        return False
+    if entry.version == 1:
+        hass.config_entries.async_update_entry(
+            entry, version=2, data={**entry.data, CONF_AUTH_METHOD: AUTH_EMAIL}
+        )
     return True
 
 

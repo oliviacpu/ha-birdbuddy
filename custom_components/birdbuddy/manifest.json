@@ -2,23 +2,25 @@
   "domain": "birdbuddy",
   "name": "Bird Buddy",
   "codeowners": [
-    "@jhansche"
+    "@oliviacpu"
   ],
   "config_flow": true,
-  "dependencies": [],
-  "documentation": "https://github.com/jhansche/ha-birdbuddy/blob/main/README.md",
+  "dependencies": [
+    "application_credentials"
+  ],
+  "documentation": "https://github.com/oliviacpu/ha-birdbuddy",
   "homekit": {},
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/jhansche/ha-birdbuddy/issues",
+  "issue_tracker": "https://github.com/oliviacpu/ha-birdbuddy/issues",
   "loggers": [
     "birdbuddy",
     "pybirdbuddy"
   ],
   "requirements": [
     "python-graphql-client==0.4.3",
-    "pybirdbuddy==0.1.0"
+    "pybirdbuddy @ https://github.com/oliviacpu/pybirdbuddy/releases/download/v0.1.1-google.1/pybirdbuddy-0.1.1%2Bgoogle.1-py3-none-any.whl"
   ],
   "ssdp": [],
-  "version": "0.1.0",
+  "version": "0.1.1",
   "zeroconf": []
 }

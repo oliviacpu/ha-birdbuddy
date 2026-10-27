@@ -8,7 +8,7 @@
             "invalid_auth": "Ongeldige authenticatie"
         },
         "step": {
-            "user": {
+            "email": {
                 "data": {
                     "email": "E-mail",
                     "password": "Wachtwoord"

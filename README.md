@@ -7,26 +7,51 @@
 
 Custom integration for [Bird Buddy][birdbuddy].
 
-This component makes use of the [pybirdbuddy] library for API calls, also
-available on [PyPI][pypi].
+This component uses the [pybirdbuddy] fork for API calls, installed from its
+versioned GitHub wheel release.
 
 ## Requirements
 
 - Home Assistant 2026.7.1 or newer (Python 3.14).
-- A Bird Buddy account. You will need its `email` and `password`.
+- An existing Bird Buddy account using Google sign-in or email and password.
 
-> **Note**
->
-> If your Bird Buddy account was created using SSO (Google, Facebook,
-> etc), those methods will not work currently. To work around that, you
-> can sign up a new account using email and password, and then invite
-> that new account as a member of your main/owner account. Be aware that
-> certain information or functionality may not be available to member
-> accounts (for example, "off-grid" settings and firmware version).
->
-> Alternatively, you may reset the Bird Buddy unit and re-pair it with a
-> new account that was created with a password. See
-> [Bird Buddy support][reset-wifi] for more information.
+### Sign in with Google
+
+This fork supports existing Bird Buddy accounts linked to Google, including
+owner accounts. Choose **Sign in with Google** during setup. Home Assistant
+stores the Bird Buddy session and renews it across restarts; you do not need a
+separate Bird Buddy account or a manually copied session token.
+
+1. Create a dedicated project in [Google Cloud](https://console.cloud.google.com/).
+2. Configure Google Auth Platform branding and an External audience. For a
+   personal installation, keep the app in Testing and add your Google account
+   under Audience > Test users when required.
+3. Create an OAuth client of type **Web application**. Add the callback URL shown
+   by Home Assistant to **Authorized redirect URIs**. With My Home Assistant,
+   this is `https://my.home-assistant.io/redirect/oauth`. A direct instance
+   callback uses `https://YOUR_HA_HOST/auth/external/callback`.
+4. Enter this client's ID and secret in Home Assistant's **Application
+   credentials** for Bird Buddy, or in the credential dialog shown during setup.
+5. Choose Google sign-in and authorize the same Google account linked to Bird
+   Buddy. Only the `userinfo.email` permission is requested.
+
+Google credentials belong to your installation. Never commit them to GitHub.
+The Google access token is exchanged immediately and discarded; configuration
+stores only Bird Buddy's renewable session token and account identity. If the
+session is revoked, Home Assistant asks you to sign in again. Existing password
+entries and entity IDs survive upgrades. Apple and Facebook sign-in are not
+implemented by this fork.
+
+### Install this fork
+
+Add `https://github.com/oliviacpu/ha-birdbuddy` as a HACS custom Integration
+repository, replacing the upstream repository for this integration. Both use the
+`birdbuddy` domain, so only one should be installed. The manifest pins a versioned
+wheel from the `oliviacpu/pybirdbuddy` fork's GitHub releases.
+
+Back up the existing component and configuration before replacing it. Restart
+Home Assistant after installation. For rollback, restore that component and its
+configuration backup, then restart Home Assistant.
 
 ## Installation
 
@@ -35,7 +60,7 @@ available on [PyPI][pypi].
 [![HACS Custom][hacs-badge]][hacs]
 
 1. Open HACS Settings and add this repository
-   (<https://github.com/jhansche/ha-birdbuddy/>) as a Custom Repository
+   (<https://github.com/oliviacpu/ha-birdbuddy/>) as a Custom Repository
    (use **Integration** as the category).
 2. The `Bird Buddy` page should automatically load (or find it in the
    HACS Store)
@@ -189,7 +214,7 @@ or go to **Settings** > **Automations & Scenes** > **Blueprints**, click
 the **Import Blueprint** button, and enter this URL:
 
 ```text
-https://github.com/jhansche/ha-birdbuddy/blob/main/custom_components/birdbuddy/blueprints/collect_postcard.yaml
+https://github.com/oliviacpu/ha-birdbuddy/blob/main/custom_components/birdbuddy/blueprints/collect_postcard.yaml
 ```
 
 After the Blueprint has been imported, you still need to
@@ -243,21 +268,19 @@ Released under the [MIT No Attribution License](LICENSE).
 
 [birdbuddy]: https://mybirdbuddy.com/
 [blueprint-automations]: https://www.home-assistant.io/docs/automation/using_blueprints/#blueprint-automations
-[blueprint-import]: https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjhansche%2Fha-birdbuddy%2Fblob%2Fmain%2Fcustom_components%2Fbirdbuddy%2Fblueprints%2Fcollect_postcard.yaml
+[blueprint-import]: https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Foliviacpu%2Fha-birdbuddy%2Fblob%2Fmain%2Fcustom_components%2Fbirdbuddy%2Fblueprints%2Fcollect_postcard.yaml
 [blueprint-import-badge]: https://my.home-assistant.io/badges/blueprint_import.svg
-[build-status]: https://github.com/jhansche/ha-birdbuddy/actions/workflows/pythonpackage.yaml?query=branch%3Amain
-[build-status-shield]: https://img.shields.io/github/actions/workflow/status/jhansche/ha-birdbuddy/pythonpackage.yaml?branch=main&style=for-the-badge
+[build-status]: https://github.com/oliviacpu/ha-birdbuddy/actions/workflows/pythonpackage.yaml?query=branch%3Amain
+[build-status-shield]: https://img.shields.io/github/actions/workflow/status/oliviacpu/ha-birdbuddy/pythonpackage.yaml?branch=main&style=for-the-badge
 [config-flow]: https://my.home-assistant.io/redirect/config_flow_start/?domain=birdbuddy
 [config-flow-badge]: https://my.home-assistant.io/badges/config_flow_start.svg
 [hacs]: https://github.com/hacs/integration
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
-[hacs-repo]: https://my.home-assistant.io/redirect/hacs_repository/?category=Integration&repository=ha-birdbuddy&owner=jhansche
+[hacs-repo]: https://my.home-assistant.io/redirect/hacs_repository/?category=Integration&repository=ha-birdbuddy&owner=oliviacpu
 [hacs-repo-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
-[license-shield]: https://img.shields.io/github/license/jhansche/ha-birdbuddy.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/oliviacpu/ha-birdbuddy.svg?style=for-the-badge
 [maintenance-shield]: https://img.shields.io/maintenance/yes/2026?style=for-the-badge
-[pybirdbuddy]: https://github.com/jhansche/pybirdbuddy
-[pypi]: https://pypi.org/project/pybirdbuddy/
-[releases]: https://github.com/jhansche/ha-birdbuddy/releases
-[releases-shield]: https://img.shields.io/github/v/release/jhansche/ha-birdbuddy.svg?style=for-the-badge
-[reset-wifi]: https://support.mybirdbuddy.com/hc/en-us/articles/9764938883089-Connecting-Bird-Buddy-to-a-different-Wi-Fi-network
+[pybirdbuddy]: https://github.com/oliviacpu/pybirdbuddy
+[releases]: https://github.com/oliviacpu/ha-birdbuddy/releases
+[releases-shield]: https://img.shields.io/github/v/release/oliviacpu/ha-birdbuddy.svg?style=for-the-badge
 [using-blueprints]: https://www.home-assistant.io/docs/automation/using_blueprints/
