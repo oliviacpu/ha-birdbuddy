@@ -185,3 +185,143 @@ async def test_update_latest_visitor_falls_back_to_collection(hass):
 
     assert visitors.latest_species is not None
     assert visitors.latest_species.name == "American Robin"
+
+
+def _postcard(species_name, created, name="c.jpg"):
+    """Build a new-postcard event.
+
+    Args:
+        species_name: The recognized species name.
+        created: The media's ``createdAt`` timestamp.
+        name: The media's file name.
+
+    Returns:
+        A mock event.
+    """
+    event = MagicMock()
+    event.data = {
+        "species": [{"id": species_name, "name": species_name}],
+        "media": {
+            "__typename": "MediaImage",
+            "id": name,
+            "contentUrl": f"https://example.invalid/{name}",
+            "thumbnailUrl": f"https://example.invalid/t-{name}",
+            "createdAt": created,
+        },
+    }
+    return event
+
+
+def _collection_client(cover):
+    """Build a client with an empty feed and one matching collection.
+
+    Args:
+        cover: The collection's cover media mapping.
+
+    Returns:
+        A mock client.
+    """
+    feed = MagicMock()
+    feed.filter = MagicMock(return_value=[])
+    client = MagicMock()
+    client.feed = AsyncMock(return_value=feed)
+    col = Collection(
+        {
+            "id": "col1",
+            "species": {"id": "s1", "name": "House Finch"},
+            "visitLastTime": "2026-07-09T12:00:00.000Z",
+            "coverCollectionMedia": {"feederName": "Bird Buddy", "media": cover},
+        }
+    )
+    client.refresh_collections = AsyncMock(return_value={"col1": col})
+    return client
+
+
+async def test_collection_fallback_uses_cover_photo(hass):
+    """With no feed sighting, the photo comes from the collection's cover."""
+    visitors = _visitors(hass, _collection_client(_img("cover.jpg")))
+
+    await visitors._update_latest_visitor()
+
+    assert visitors.latest_species is not None
+    assert visitors.latest_species.name == "House Finch"
+    assert visitors.latest_media is not None
+    assert "cover.jpg" in visitors.latest_media.thumbnail_url
+
+
+async def test_replayed_older_postcards_do_not_replace_newest(hass):
+    """Postcards replay newest first, and the newest stays the latest."""
+    visitors = _visitors(hass)
+    listener = MagicMock()
+    visitors._listeners.add(listener)
+
+    await visitors._on_new_postcard(_postcard("Blue Jay", "2026-10-27T18:47:15.000Z"))
+    await visitors._on_new_postcard(
+        _postcard("House Finch", "2026-10-25T20:23:28.000Z")
+    )
+
+    assert visitors.latest_species is not None
+    assert visitors.latest_species.name == "Blue Jay"
+    listener.assert_called_once()
+
+
+async def test_same_postcard_refreshes_its_url(hass):
+    """A replay of the same photo may carry a fresher signed URL."""
+    visitors = _visitors(hass)
+    created = "2026-10-27T18:47:15.000Z"
+
+    await visitors._on_new_postcard(_postcard("Blue Jay", created, "old.jpg"))
+    await visitors._on_new_postcard(_postcard("Blue Jay", created, "fresh.jpg"))
+
+    assert visitors.latest_media is not None
+    assert visitors.latest_media.content_url == "https://example.invalid/fresh.jpg"
+
+
+async def test_latest_visitor_survives_restart(hass):
+    """A postcard that has left the feed is still the latest after a restart."""
+    before = _visitors(hass)
+    await before._on_new_postcard(_postcard("Blue Jay", "2026-10-27T18:47:15.000Z"))
+
+    # The collection's newest visitor is older than the restored postcard.
+    after = _visitors(hass, _collection_client(_img("cover.jpg")))
+    listener = MagicMock()
+    after._listeners.add(listener)
+    await after._update_latest_visitor()
+
+    assert after.latest_species is not None
+    assert after.latest_species.name == "Blue Jay"
+    assert after.latest_media is not None
+    assert after.latest_media.content_url == "https://example.invalid/c.jpg"
+    assert listener.call_count == 2
+
+
+async def test_older_feed_item_does_not_replace_restored_visitor(hass):
+    """Seeding from the feed keeps a newer restored visitor."""
+    before = _visitors(hass)
+    await before._on_new_postcard(_postcard("Blue Jay", "2026-10-27T18:47:15.000Z"))
+
+    feed = MagicMock()
+    feed.filter = MagicMock(
+        return_value=[_node("a", "2026-07-08T12:00:00.000Z", "American Robin", "o")]
+    )
+    client = MagicMock()
+    client.feed = AsyncMock(return_value=feed)
+    after = _visitors(hass, client)
+    await after._update_latest_visitor()
+
+    assert after.latest_species is not None
+    assert after.latest_species.name == "Blue Jay"
+
+
+async def test_late_listener_hears_about_expired_media(hass):
+    """A listener registered late still gets a visitor with an expired URL."""
+    visitors = _visitors(hass)
+    expired = _postcard("Blue Jay", "2026-10-27T18:47:15.000Z", "c.jpg?Expires=1")
+    await visitors._on_new_postcard(expired)
+    visitors._listeners.add(MagicMock())
+
+    late = MagicMock()
+    remove = visitors.register_callback(late)
+
+    late.assert_called_once_with(visitors)
+    remove()

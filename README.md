@@ -108,6 +108,10 @@ account. See below for the entities available.
 | `Signal`         | `sensor`        | Current wifi signal (RSSI)                                                                                                         |
 | `Update`         | `update`        | Show and install Firmware updates (owners only)                                                                                    |
 
+The `Recent Visitor Image` entity keeps the latest photo on disk, so it survives
+restarts and expired links. Until a postcard arrives, it shows the cover photo
+of your most recently visited collected species.
+
 Some entities are disabled or hidden by default, if they represent an
 advanced use case (for example, the "Signal" and "Recent Visitor"
 entities). There are also some entities that are disabled by default

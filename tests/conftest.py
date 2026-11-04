@@ -18,6 +18,12 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     return
 
 
+@pytest.fixture(autouse=True)
+def auto_mock_storage(hass_storage):
+    """Keep Store writes in memory, so tests can't leak state to each other."""
+    return hass_storage
+
+
 @pytest.fixture(name="skip_notifications", autouse=True)
 def skip_notifications_fixture():
     """Skip persistent notification calls during tests."""
