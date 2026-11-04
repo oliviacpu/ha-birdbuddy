@@ -7,13 +7,23 @@ from birdbuddy.birds import Species
 from birdbuddy.client import BirdBuddy
 from birdbuddy.feed import FeedNodeType
 from birdbuddy.feeder import Feeder
-from birdbuddy.media import Media, is_media_expired
+from birdbuddy.media import Media
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers.storage import Store
 
-from .const import ATTR_FEEDER_ID, ATTR_MEDIA, ATTR_SPECIES, EVENT_NEW_POSTCARD, LOGGER
+from .const import (
+    ATTR_FEEDER_ID,
+    ATTR_MEDIA,
+    ATTR_SPECIES,
+    DOMAIN,
+    EVENT_NEW_POSTCARD,
+    LOGGER,
+)
 from .util import _find_media_with_species
 
 type VisitorCallback = Callable[[RecentVisitors], None]
+
+STORE_VERSION = 1
 
 
 class RecentVisitors:
@@ -39,6 +49,9 @@ class RecentVisitors:
         self._disposable: Callable[[], None] | None = None
         self._latest_media: Media | None = None
         self._latest_species: Species | None = None
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORE_VERSION, f"{DOMAIN}.{feeder.id}.latest_visitor"
+        )
 
     @property
     def latest_media(self) -> Media | None:
@@ -62,7 +75,8 @@ class RecentVisitors:
         """Register a callback fired when a new visitor is detected.
 
         Starts listening on the first registration and immediately notifies
-        the listener if there is already unexpired media.
+        the listener if a visitor is already known, even when its media URL
+        has expired: the image entity may hold that photo on disk.
 
         Args:
             listener: The callback to invoke on each new visitor.
@@ -72,9 +86,7 @@ class RecentVisitors:
         """
         if not self._listeners:
             self._disposable = self._start()
-        if self._latest_media and not is_media_expired(
-            self._latest_media.content_url or self._latest_media.thumbnail_url
-        ):
+        if self._latest_media or self._latest_species:
             listener(self)
         self._listeners.add(listener)
         return lambda: self.unregister_callback(listener)
@@ -123,8 +135,47 @@ class RecentVisitors:
             event_filter=filter_my_postcards,
         )
 
+    def _is_older(self, media: Media | None) -> bool:
+        """Return whether media predates the visitor already recorded.
+
+        Uncollected postcards replay after every restart, newest first, so
+        without this check the oldest one would end up as the latest visitor.
+
+        Args:
+            media: The candidate media, if any.
+
+        Returns:
+            True if the candidate is older than the recorded media.
+        """
+        return bool(
+            media
+            and self._latest_media
+            and media.created_at < self._latest_media.created_at
+        )
+
+    async def _async_restore(self) -> None:
+        """Restore the visitor recorded before the last restart."""
+        if not (stored := await self._store.async_load()):
+            return
+        if media := stored.get("media"):
+            self._latest_media = Media(media)
+        if species := stored.get("species"):
+            self._latest_species = Species(species)
+        self._notify_listeners()
+
+    async def _async_save(self) -> None:
+        """Record the latest visitor so it survives a restart."""
+        await self._store.async_save(
+            {
+                "media": dict(self._latest_media) if self._latest_media else None,
+                "species": dict(self._latest_species) if self._latest_species else None,
+            }
+        )
+
     async def _update_latest_visitor(self) -> None:
-        """Seed the latest visitor from the feed or the collections."""
+        """Seed the latest visitor from storage, the feed or the collections."""
+        await self._async_restore()
+
         feed = await self.client.feed()
 
         items = feed.filter(
@@ -145,20 +196,21 @@ class RecentVisitors:
         if dated:
             latest = max(dated, key=lambda pair: pair[0])[1]
             media = Media(latest["media"])
-            self._latest_media = media
-            species = [Species(s) for s in latest.get("species", [])]
-            self._latest_species = next(iter(species), None)
-            LOGGER.debug(
-                "Setting recent visitor on %s from feed: %s, %s: %s",
-                self.feeder.name,
-                (
-                    self._latest_species.name
-                    if self._latest_species
-                    else "Unknown species"
-                ),
-                media.created_at,
-                media.content_url,
-            )
+            if not self._is_older(media):
+                self._latest_media = media
+                species = [Species(s) for s in latest.get("species", [])]
+                self._latest_species = next(iter(species), None)
+                LOGGER.debug(
+                    "Setting recent visitor on %s from feed: %s, %s: %s",
+                    self.feeder.name,
+                    (
+                        self._latest_species.name
+                        if self._latest_species
+                        else "Unknown species"
+                    ),
+                    media.created_at,
+                    media.content_url,
+                )
 
         if not self._latest_species:
             # Did not find media in the feed.
@@ -168,8 +220,10 @@ class RecentVisitors:
                 species := c.species
             ):
                 self._latest_species = species
-                # TODO(jhansche): fetching the latest media that matches a
-                # feeder from the collection is not straightforward.
+                # The cover isn't always the newest photo of this species, but
+                # it matches the name and is better than no picture at all.
+                if cover := c.get("coverCollectionMedia", {}).get("media"):
+                    self._latest_media = Media(cover)
                 LOGGER.debug(
                     "Setting recent visitor on %s from collection: %s",
                     self.feeder.name,
@@ -178,6 +232,7 @@ class RecentVisitors:
 
         # Notify listeners
         self._notify_listeners()
+        await self._async_save()
 
     def _notify_listeners(self) -> None:
         """Notify listeners of the latest visitor."""
@@ -201,7 +256,11 @@ class RecentVisitors:
 
         # Rebuild the library models from the slim payload; set both together
         # so the recent-visitor state never lags its picture.
-        self._latest_media = Media(media) if media else None
+        new_media = Media(media) if media else None
+        if self._is_older(new_media):
+            LOGGER.debug("Ignoring older postcard for %s", self.feeder.name)
+            return
+        self._latest_media = new_media
         self._latest_species = Species(species[0]) if species else None
 
         LOGGER.debug(
@@ -211,3 +270,4 @@ class RecentVisitors:
             self._latest_media.content_url if self._latest_media else None,
         )
         self._notify_listeners()
+        await self._async_save()
