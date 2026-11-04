@@ -193,6 +193,43 @@ async def test_failed_download_keeps_current_photo(hass):
 
 
 @pytest.mark.usefixtures("config_dir")
+@pytest.mark.parametrize(
+    "latest",
+    [_MEDIA | {"id": "m2", "contentUrl": _EXPIRED}, None],
+    ids=["expired URL", "no media"],
+)
+async def test_saved_photo_shows_when_latest_cannot_load(hass, latest):
+    """After a restart, an older saved photo beats showing nothing."""
+    first = _image_entity(hass)
+    with patch.object(first, "_fetch_url", _response(b"old")):
+        await _refresh(first, _visitors())
+
+    restarted = _image_entity(hass)
+    await _refresh(restarted, _visitors(latest))
+
+    assert await restarted.async_image() == b"old"
+    assert restarted.image_last_updated is not None
+    assert _on_disk(hass) == ["m1.jpg"]
+
+
+@pytest.mark.usefixtures("config_dir")
+async def test_latest_replaces_saved_photo_once_it_can_load(hass):
+    """The fallback photo gives way when the latest visitor's loads."""
+    first = _image_entity(hass)
+    with patch.object(first, "_fetch_url", _response(b"old")):
+        await _refresh(first, _visitors())
+
+    restarted = _image_entity(hass)
+    expired = _MEDIA | {"id": "m2", "contentUrl": _EXPIRED}
+    await _refresh(restarted, _visitors(expired))
+    with patch.object(restarted, "_fetch_url", _response(b"new")):
+        await _refresh(restarted, _visitors(_MEDIA | {"id": "m2"}))
+
+    assert await restarted.async_image() == b"new"
+    assert _on_disk(hass) == ["m2.jpg"]
+
+
+@pytest.mark.usefixtures("config_dir")
 async def test_new_photo_replaces_saved_one(hass):
     """Only the latest photo stays on disk."""
     entity = _image_entity(hass)

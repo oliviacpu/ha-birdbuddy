@@ -1,6 +1,7 @@
 """The Bird Buddy image entity."""
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 from birdbuddy.media import Media, is_media_expired
@@ -53,6 +54,24 @@ def _read_cached_image(path: Path) -> bytes | None:
     except OSError as err:
         LOGGER.warning("Could not read saved visitor photo %s: %s", path, err)
         return None
+
+
+def _read_any_cached_image(folder: Path) -> tuple[bytes, datetime] | None:
+    """Read whichever photo is saved in a folder.
+
+    Args:
+        folder: The feeder's photo folder.
+
+    Returns:
+        The photo's bytes and when it was saved, or None if there isn't one.
+    """
+    try:
+        for path in folder.glob("*.jpg"):
+            saved_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+            return path.read_bytes(), saved_at
+    except OSError as err:
+        LOGGER.warning("Could not read saved visitor photo in %s: %s", folder, err)
+    return None
 
 
 def _write_cached_image(path: Path, content: bytes) -> None:
@@ -168,23 +187,48 @@ class BirdBuddyRecentVisitorImageEntity(BirdBuddyMixin, ImageEntity):
     async def _async_refresh_image(self, visitors: RecentVisitors) -> None:
         """Swap in the latest visitor's photo once its bytes are in hand.
 
-        A photo that can't be loaded leaves the current one showing. The lock
-        keeps overlapping updates in order, and each reads the visitor only
-        once it holds the lock, so the newest always wins.
+        A photo that can't be loaded leaves the current one showing, or the
+        one saved on disk if nothing is showing yet. The lock keeps overlapping
+        updates in order, and each reads the visitor only once it holds the
+        lock, so the newest always wins.
 
         Args:
             visitors: The recent-visitors tracker for this feeder.
         """
         async with self._refresh_lock:
             media = visitors.latest_media
-            if media is None or media.id == self._shown_media_id:
+            if media is not None and media.id == self._shown_media_id:
                 return
-            if (content := await self._async_load_media(media)) is None:
+            content = await self._async_load_media(media) if media else None
+            if media is None or content is None:
+                if self._cached_image is None:
+                    await self._async_show_saved_photo()
                 return
             self._cached_image = Image(content_type="image/jpeg", content=content)
             self._attr_image_last_updated = media.created_at
             self._shown_media_id = media.id
             self.async_write_ha_state()
+
+    @property
+    def _photo_folder(self) -> Path:
+        """Return the folder holding this feeder's saved photo."""
+        return Path(self.hass.config.path(STORAGE_DIR, DOMAIN, slugify(self.feeder.id)))
+
+    async def _async_show_saved_photo(self) -> None:
+        """Show the saved photo when the latest visitor's can't be loaded.
+
+        It's a different visitor's photo, so ``_shown_media_id`` stays unset
+        and the next update tries the latest visitor again.
+        """
+        saved = await self.hass.async_add_executor_job(
+            _read_any_cached_image, self._photo_folder
+        )
+        if saved is None:
+            return
+        content, saved_at = saved
+        self._cached_image = Image(content_type="image/jpeg", content=content)
+        self._attr_image_last_updated = saved_at
+        self.async_write_ha_state()
 
     async def _async_load_media(self, media: Media) -> bytes | None:
         """Load a photo from disk, or download and save it.
@@ -195,9 +239,7 @@ class BirdBuddyRecentVisitorImageEntity(BirdBuddyMixin, ImageEntity):
         Returns:
             The photo's bytes, or None if it isn't saved and can't be fetched.
         """
-        path = Path(
-            self.hass.config.path(STORAGE_DIR, DOMAIN, slugify(self.feeder.id))
-        ) / (f"{slugify(media.id)}.jpg")
+        path = self._photo_folder / f"{slugify(media.id)}.jpg"
         if content := await self.hass.async_add_executor_job(_read_cached_image, path):
             return content
 
