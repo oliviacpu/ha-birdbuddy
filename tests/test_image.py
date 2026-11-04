@@ -132,6 +132,30 @@ def test_on_recent_visitor_schedules_refresh(hass):
     create_task.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("known", "shown", "retries"),
+    [(True, None, True), (True, "m1", False), (False, None, False)],
+    ids=["not loaded yet", "already showing", "no visitor known"],
+)
+def test_poll_retries_photo_not_loaded_yet(hass, known, shown, retries):
+    """Each poll retries only a known visitor whose photo isn't showing."""
+    entity = _image_entity(hass)
+    visitors = _visitors()
+    entity.coordinator.visitors = {"f1": visitors} if known else {}
+    entity._shown_media_id = shown
+    retry = MagicMock()
+    with (
+        patch.object(entity, "_on_recent_visitor", retry),
+        patch.object(entity, "async_write_ha_state"),
+    ):
+        entity._handle_coordinator_update()
+
+    if retries:
+        retry.assert_called_once_with(visitors)
+    else:
+        retry.assert_not_called()
+
+
 @pytest.mark.usefixtures("config_dir")
 async def test_refresh_downloads_and_saves_photo(hass):
     """A new visitor's photo is fetched at once, saved and served locally."""

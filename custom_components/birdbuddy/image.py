@@ -149,10 +149,7 @@ class BirdBuddyRecentVisitorImageEntity(BirdBuddyMixin, ImageEntity):
 
         Returns:
             The fetched image tagged as `image/jpeg`, or None if the fetch
-            returned no content.
-
-        Raises:
-            HomeAssistantError: If ``_fetch_url`` encounters an HTTP error.
+            failed; ``_fetch_url`` logs HTTP errors and returns None.
         """
         if response := await self._fetch_url(url):
             return Image(
@@ -170,6 +167,22 @@ class BirdBuddyRecentVisitorImageEntity(BirdBuddyMixin, ImageEntity):
                 self._on_recent_visitor,
             )
         )
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Retry on each poll a photo that hasn't loaded yet.
+
+        Visitor listeners fire only when a visitor changes, so nothing else
+        would try a failed download again before the next postcard.
+        """
+        visitors = self.coordinator.visitors.get(self.feeder.id)
+        if (
+            visitors
+            and (media := visitors.latest_media)
+            and media.id != self._shown_media_id
+        ):
+            self._on_recent_visitor(visitors)
+        super()._handle_coordinator_update()
 
     @callback
     def _on_recent_visitor(self, visitors: RecentVisitors) -> None:
