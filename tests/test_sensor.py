@@ -1,5 +1,6 @@
 """Tests for the Bird Buddy recent-visitor sensor."""
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from birdbuddy.feeder import Feeder
@@ -75,3 +76,20 @@ async def test_recent_visitor_state_tracks_its_picture(hass):
         entity._on_recent_visitor(visitors)
         assert entity.native_value is None
         assert entity.entity_picture == "https://example.invalid/c2.jpg"
+
+
+async def test_recent_visitor_reports_when_the_visit_happened(hass):
+    """The visit's time is an attribute, since the state's timestamps reset."""
+    feeder = Feeder({"id": "feeder1", "name": "Bird Buddy"})
+    visitors = RecentVisitors(feeder, MagicMock(), hass)
+    entity = _recent_entity()
+
+    with patch.object(entity, "async_write_ha_state"):
+        entity._on_recent_visitor(visitors)
+        assert entity.extra_state_attributes == {}
+
+        await visitors._on_new_postcard(_postcard_event([_ROBIN], _M1))
+        entity._on_recent_visitor(visitors)
+        assert entity.extra_state_attributes == {
+            "last_visit": datetime(2026, 7, 9, 12, tzinfo=UTC)
+        }

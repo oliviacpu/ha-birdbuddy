@@ -31,6 +31,9 @@ ATTR_SHARE = "share"
 ATTR_SPECIES = "species"
 ATTR_MEDIA = "media"
 
+# Recent-visitor sensor attribute: when the visitor's photo was taken.
+ATTR_LAST_VISIT = "last_visit"
+
 TRIGGER_TYPE_POSTCARD = "new_postcard"
 EVENT_NEW_POSTCARD = f"{DOMAIN}_new_postcard"
 

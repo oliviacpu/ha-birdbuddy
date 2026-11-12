@@ -22,7 +22,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, LOGGER
+from .const import ATTR_LAST_VISIT, DOMAIN, LOGGER
 from .coordinator import BirdBuddyDataUpdateCoordinator
 from .device import BirdBuddyDevice
 from .entity import BirdBuddyMixin
@@ -227,6 +227,11 @@ class BirdBuddyRecentVisitorEntity(BirdBuddyMixin, RestoreSensor):
         self._latest_media = media
         self._attr_entity_picture = media.content_url if media else None
         self._attr_native_value = species.name if species else None
+        # The state's own timestamps move on every restart, so the visit's
+        # time travels as an attribute that dashboards can show instead.
+        self._attr_extra_state_attributes = (
+            {ATTR_LAST_VISIT: media.created_at} if media else {}
+        )
         self.async_write_ha_state()
 
 

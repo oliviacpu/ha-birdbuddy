@@ -108,6 +108,10 @@ account. See below for the entities available.
 | `Signal`         | `sensor`        | Current wifi signal (RSSI)                                                                                                         |
 | `Update`         | `update`        | Show and install Firmware updates (owners only)                                                                                    |
 
+The `Recent Visitor` sensor's `last_visit` attribute is when that photo was
+taken. Show it rather than the sensor's last-updated time, which moves on every
+restart.
+
 The `Recent Visitor Image` entity keeps the latest photo on disk, so it survives
 restarts and expired links. Until a postcard arrives, it shows the cover photo
 of your most recently visited collected species.
@@ -134,7 +138,9 @@ they arrive. Only opened postcards can be viewed in the Media Browser
 ### `birdbuddy_new_postcard`
 
 This event is fired when a new postcard is detected in the feed and Bird
-Buddy has identified its species.
+Buddy has identified its species. Each postcard fires once: the integration
+remembers how far through the feed it has read, so a restart does not fire
+uncollected postcards again.
 
 | Field         | Description                                                                                        |
 | ------------- | -------------------------------------------------------------------------------------------------- |
