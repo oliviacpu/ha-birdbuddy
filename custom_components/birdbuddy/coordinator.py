@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from birdbuddy.client import BirdBuddy
@@ -18,6 +19,7 @@ from birdbuddy.media import Collection
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, EventOrigin, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -34,6 +36,8 @@ from .const import (
 from .device import BirdBuddyDevice
 from .repairs import async_check_legacy_event_listeners
 from .visitors import RecentVisitors, VisitorCallback
+
+FEED_CURSOR_STORE_VERSION = 1
 
 
 class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
@@ -61,6 +65,14 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         self.feeders = {}
         self.visitors = {}
         self.first_update = True
+        # The newest feed item already handled. Kept on disk so a restart
+        # resumes the feed where it left off, rather than firing every
+        # uncollected postcard again as if it were new.
+        self._feed_since: datetime | None = None
+        self._feed_cursor_loaded = False
+        self._feed_cursor: Store[dict[str, Any]] = Store(
+            hass, FEED_CURSOR_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.feed_cursor"
+        )
         super().__init__(
             hass,
             LOGGER,
@@ -146,6 +158,32 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
                 origin=EventOrigin.remote,
             )
 
+    async def _refresh_feed(self) -> None:
+        """Process the feed items newer than the saved cursor, then advance it.
+
+        With no saved cursor (a new install) only the newest feed page is
+        processed, as before.
+        """
+        if not self._feed_cursor_loaded:
+            stored = await self._feed_cursor.async_load()
+            if stored and (since := stored.get("since")):
+                self._feed_since = FeedNode.parse_datetime(since)
+            self._feed_cursor_loaded = True
+
+        feed = await (
+            self.client.refresh_feed(since=self._feed_since)
+            if self._feed_since
+            else self.client.refresh_feed()
+        )
+        await self._process_feed(feed)
+
+        newest = max((n.created_at for n in feed if n.created_at), default=None)
+        if newest is not None and (
+            self._feed_since is None or newest > self._feed_since
+        ):
+            self._feed_since = newest
+            await self._feed_cursor.async_save({"since": newest.isoformat()})
+
     async def _async_update_data(self) -> BirdBuddy:
         """Fetch the latest data from the Bird Buddy API.
 
@@ -166,8 +204,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             # item timestamp, that would prevent seeing that postcard again.
             # This delays the first postcard handling until the next update.
             if not self.first_update:
-                feed = await self.client.refresh_feed()
-                await self._process_feed(feed)
+                await self._refresh_feed()
         except (AuthenticationFailedError, AuthTokenExpiredError) as exc:
             msg = "Bird Buddy sign-in must be renewed"
             raise ConfigEntryAuthFailed(msg) from exc

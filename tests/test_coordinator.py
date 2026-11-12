@@ -1,7 +1,8 @@
 """Tests for the Bird Buddy coordinator."""
 
+from datetime import UTC, datetime
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from birdbuddy.exceptions import GraphqlError
 from birdbuddy.feed import FeedNode
@@ -131,3 +132,82 @@ async def test_handle_collect_postcard(hass):
     )
     assert result is True
     client.collect_postcard.assert_awaited_once_with("pc1", share=True)
+
+
+def _feed_client(*pages: list[FeedNode]) -> MagicMock:
+    """Build a client whose refresh_feed returns the given pages in turn.
+
+    Args:
+        pages: One list of feed nodes per refresh_feed call.
+
+    Returns:
+        A mock client with one feeder.
+    """
+    client = MagicMock()
+    client.refresh = AsyncMock()
+    client.feeders = {
+        "feeder1": {"__typename": "FeederForOwner", "id": "feeder1", "name": "BB"}
+    }
+    client.refresh_feed = AsyncMock(side_effect=list(pages))
+    client.identify_postcard = AsyncMock(return_value=_ANALYSIS)
+    return client
+
+
+_PC1 = FeedNode(
+    {
+        "__typename": "FeedItemNewPostcard",
+        "id": "pc1",
+        "createdAt": "2026-11-08T21:06:46.011Z",
+    }
+)
+
+
+async def test_a_restart_does_not_replay_handled_postcards(hass, hass_storage):
+    """The feed cursor survives a restart, so old postcards stay handled.
+
+    Uncollected postcards stay in the feed, and before the cursor was saved
+    each restart fired them again as new visitors.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    events = []
+    hass.bus.async_listen(EVENT_NEW_POSTCARD, events.append)
+
+    first = _feed_client([_PC1])
+    coordinator = BirdBuddyDataUpdateCoordinator(hass, first, entry)
+    coordinator.first_update = False
+    await coordinator._async_update_data()
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    first.refresh_feed.assert_awaited_once_with()
+
+    # A new coordinator stands in for the restart; the cursor comes from disk.
+    second = _feed_client([])
+    restarted = BirdBuddyDataUpdateCoordinator(hass, second, entry)
+    restarted.first_update = False
+    await restarted._async_update_data()
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    second.refresh_feed.assert_awaited_once_with(
+        since=datetime(2026, 11, 8, 21, 6, 46, 11000, tzinfo=UTC)
+    )
+
+
+async def test_an_empty_feed_keeps_the_cursor(hass, hass_storage):
+    """A refresh with nothing new leaves the saved cursor where it was."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.bus.async_listen(EVENT_NEW_POSTCARD, lambda _: None)
+
+    client = _feed_client([_PC1], [], [])
+    coordinator = BirdBuddyDataUpdateCoordinator(hass, client, entry)
+    coordinator.first_update = False
+    for _ in range(3):
+        await coordinator._async_update_data()
+    await hass.async_block_till_done()
+
+    since = datetime(2026, 11, 8, 21, 6, 46, 11000, tzinfo=UTC)
+    assert client.refresh_feed.await_args_list[1:] == [
+        call(since=since),
+        call(since=since),
+    ]
