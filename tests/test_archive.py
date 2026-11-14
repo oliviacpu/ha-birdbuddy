@@ -105,10 +105,7 @@ async def test_saves_a_postcards_photo_video_and_details(hass, tmp_path, media_u
     assert details["species"] == ["American Robin"]
     assert details["feeder"] == "Birdhouse"
     assert details["confidence"] == "HIGH_CONFIDENCE"
-    assert details["files"] == [
-        f"{time} American Robin.jpg",
-        f"{time} American Robin.mp4",
-    ]
+    assert details["files"] == written
     index = json.loads((tmp_path / INDEX_FILE).read_text())
     assert index == {
         "m1": written[0],
@@ -417,7 +414,7 @@ async def test_a_missing_details_file_is_written_on_retry(hass, tmp_path, media_
     assert await archive.async_save_postcard(analysis) == []
     day, time = _local_stem()
     details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
-    assert details["files"] == [f"{time} American Robin.jpg"]
+    assert details["files"] == [f"{day}/{time} American Robin.jpg"]
 
 
 async def test_a_retry_that_saves_more_media_updates_the_details(
@@ -438,5 +435,8 @@ async def test_a_retry_that_saves_more_media_updates_the_details(
     day, time = _local_stem()
     assert written == [f"{day}/{time} Blue Jay 2.jpg"]
     details = json.loads((tmp_path / f"{day}/{time} Blue Jay.json").read_text())
-    assert details["files"] == [f"{time} Blue Jay.jpg", f"{time} Blue Jay 2.jpg"]
+    assert details["files"] == [
+        f"{day}/{time} Blue Jay.jpg",
+        f"{day}/{time} Blue Jay 2.jpg",
+    ]
     assert not list((tmp_path / day).glob("*Blue Jay 2.json"))

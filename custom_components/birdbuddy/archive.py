@@ -9,10 +9,11 @@ date folders that Home Assistant's Media panel can browse::
     <folder>/2026/11/14/08-14-02 American Robin 2.mp4
     <folder>/2026/11/14/08-14-02 American Robin.json
 
-The JSON file beside a postcard's media holds the species, the confidence and
-the feeder. ``.index.json`` in the archive folder maps each saved media id,
-and each postcard's details file, to its file, so a visit that turns up
-again (a later poll, a backfill from the collections) is not saved twice.
+The JSON file beside a postcard's media holds the species, the confidence,
+the feeder and its files (paths from the archive folder). ``.index.json``
+in the archive folder maps each saved media id, and each postcard's details
+file, to its file, so a visit that turns up again (a later poll, a backfill
+from the collections) is not saved twice.
 """
 
 from __future__ import annotations
@@ -347,7 +348,9 @@ class PostcardArchive:
             written = await self._async_save_media(medias, label, when)
             index = await self._async_index()
             details_key = f"{DETAILS_PREFIX}{analysis.id}"
-            files = [Path(index[m.id]).name for m in medias if m.id in index]
+            # Paths from the archive folder: collection items are filed by the
+            # day each was taken, which may not be the postcard's day.
+            files = [index[m.id] for m in medias if m.id in index]
             # Tracked on its own, so a retry writes it when it's missing, and
             # rewrites it in place when the retry saved more of the media.
             if files and (details_key not in index or written):

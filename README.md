@@ -147,7 +147,8 @@ whether or not you collect it:
 /media/birdbuddy/2026/11/14/08-14-02 American Robin.json
 ```
 
-The JSON file holds the species, the confidence and the feeder. A folder
+The JSON file holds the species, the confidence, the feeder and the visit's
+files. A folder
 under `/media` shows up in the Media panel under **My media**. Leave the
 option blank to turn the archive off. To save what Bird Buddy already holds,
 run the `birdbuddy.archive_history` action once (see below).
