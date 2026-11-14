@@ -110,7 +110,11 @@ async def test_saves_a_postcards_photo_video_and_details(hass, tmp_path, media_u
         f"{time} American Robin.mp4",
     ]
     index = json.loads((tmp_path / INDEX_FILE).read_text())
-    assert index == {"m1": written[0], "v1": written[1]}
+    assert index == {
+        "m1": written[0],
+        "v1": written[1],
+        "postcard:pc1": f"{day}/{time} American Robin.json",
+    }
 
 
 async def test_a_saved_visit_is_not_saved_twice(hass, tmp_path, media_urls):
@@ -390,3 +394,27 @@ async def test_options_flow_normalizes_the_folder(hass, tmp_path):
         result["flow_id"], {CONF_ARCHIVE_FOLDER: f"{tmp_path}/birds/"}
     )
     assert entry.options == {CONF_ARCHIVE_FOLDER: f"{tmp_path}/birds"}
+
+
+async def test_a_missing_details_file_is_written_on_retry(hass, tmp_path, media_urls):
+    """If the details file failed, a retry writes it though the media is saved."""
+    archive = PostcardArchive(hass, tmp_path)
+    analysis = _analysis([_image()], ["American Robin"])
+    real_write = archive._write_file
+
+    def fail_json(folder, stem, suffix, content):
+        if suffix == ".json":
+            msg = "disk full"
+            raise OSError(msg)
+        return real_write(folder, stem, suffix, content)
+
+    with (
+        patch.object(archive, "_write_file", side_effect=fail_json),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        await archive.async_save_postcard(analysis)
+
+    assert await archive.async_save_postcard(analysis) == []
+    day, time = _local_stem()
+    details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
+    assert details["files"] == [f"{time} American Robin.jpg"]

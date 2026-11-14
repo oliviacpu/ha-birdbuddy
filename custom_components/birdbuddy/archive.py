@@ -10,9 +10,9 @@ date folders that Home Assistant's Media panel can browse::
     <folder>/2026/11/14/08-14-02 American Robin.json
 
 The JSON file beside a postcard's media holds the species, the confidence and
-the feeder. ``.index.json`` in the archive folder maps each saved media id to
-its file, so a visit that turns up again (a later poll, a backfill from the
-collections) is not saved twice.
+the feeder. ``.index.json`` in the archive folder maps each saved media id,
+and each postcard's details file, to its file, so a visit that turns up
+again (a later poll, a backfill from the collections) is not saved twice.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ from .const import LOGGER
 INDEX_FILE = ".index.json"
 # hass.data key: one archive per folder, shared by every account that uses it.
 DATA_ARCHIVES = "birdbuddy_archives"
+# Index key prefix for a postcard's details file, beside the media ids.
+DETAILS_PREFIX = "postcard:"
 UNKNOWN_VISITOR = "Unknown visitor"
 
 _CONTENT_TYPES = {
@@ -330,22 +332,29 @@ class PostcardArchive:
         when = dt_util.as_local(min(m.created_at for m in medias))
         async with self._lock:
             written = await self._async_save_media(medias, label, when)
-            if written:
+            index = await self._async_index()
+            details_key = f"{DETAILS_PREFIX}{analysis.id}"
+            files = [Path(index[m.id]).name for m in medias if m.id in index]
+            # Written once per postcard and tracked on its own, so a retry
+            # writes it even when every media item was saved earlier.
+            if files and details_key not in index:
                 details: dict[str, Any] = {
                     "postcard_id": analysis.id,
                     "time": when.isoformat(),
                     "feeder": feeder_name,
                     "species": species,
                     "confidence": analysis.confidence,
-                    "files": [Path(w).name for w in written],
+                    "files": files,
                 }
-                await self._hass.async_add_executor_job(
+                path = await self._hass.async_add_executor_job(
                     self._write_file,
                     self._day_folder(when),
                     f"{when:%H-%M-%S} {label}",
                     ".json",
                     json.dumps(details, indent=1, ensure_ascii=False).encode(),
                 )
+                index[details_key] = path.relative_to(self.folder).as_posix()
+                await self._hass.async_add_executor_job(self._write_index, dict(index))
         return written
 
     async def async_save_collection(
