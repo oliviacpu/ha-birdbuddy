@@ -16,18 +16,21 @@ from birdbuddy.exceptions import (
 from birdbuddy.feed import FeedNode, FeedNodeType
 from birdbuddy.feeder import Feeder
 from birdbuddy.media import Collection
+from birdbuddy.postcards import PostcardAnalysis
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, EventOrigin, HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .archive import PostcardArchive
 from .const import (
     ATTR_FEEDER_ID,
     ATTR_MEDIA,
     ATTR_POSTCARD_ID,
     ATTR_SHARE,
     ATTR_SPECIES,
+    CONF_ARCHIVE_FOLDER,
     DOMAIN,
     EVENT_NEW_POSTCARD,
     LOGGER,
@@ -62,6 +65,11 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             entry: The config entry this coordinator serves.
         """
         self.client = client
+        self.archive: PostcardArchive | None = (
+            PostcardArchive(hass, folder)
+            if (folder := entry.options.get(CONF_ARCHIVE_FOLDER))
+            else None
+        )
         self.feeders = {}
         self.visitors = {}
         self.first_update = True
@@ -101,10 +109,10 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """Process new feed items, emitting an event per new postcard.
 
         For each new postcard, run the AI identification with
-        ``BirdBuddy.identify_postcard`` and fire a slim
-        ``birdbuddy_new_postcard`` event carrying the recognized species and
-        media. Collecting is left to the user's automations, via the
-        ``birdbuddy.collect_postcard`` service.
+        ``BirdBuddy.identify_postcard``, save the visit to the archive when
+        one is set up, and fire a slim ``birdbuddy_new_postcard`` event
+        carrying the recognized species and media. Collecting is left to the
+        user's automations, via the ``birdbuddy.collect_postcard`` service.
 
         A postcard the server refuses to identify is logged and skipped, so
         the entities that read the account data stay available.
@@ -129,8 +137,11 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         LOGGER.debug("Found postcards %s", postcards)
         for postcard in postcards:
             LOGGER.debug("A new postcard is ready to process: %s", postcard)
-            if not self.hass.bus.async_listeners().get(EVENT_NEW_POSTCARD):
-                # No listeners, so skip the identify API call.
+            has_listeners = bool(
+                self.hass.bus.async_listeners().get(EVENT_NEW_POSTCARD)
+            )
+            if not has_listeners and self.archive is None:
+                # Nothing would use the result, so skip the identify API call.
                 LOGGER.debug("No event listeners: skipping postcard identification")
                 continue
 
@@ -145,6 +156,10 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
                 # the poll successful and carry on with the next postcard.
                 LOGGER.exception("Could not identify postcard %s", postcard.node_id)
                 continue
+            if self.archive is not None:
+                await self.async_archive_postcard(analysis)
+            if not has_listeners:
+                continue
             media = next(iter(analysis.medias), None)
             data = {
                 ATTR_POSTCARD_ID: analysis.id,
@@ -157,6 +172,74 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
                 event_data=data,
                 origin=EventOrigin.remote,
             )
+
+    async def async_archive_postcard(self, analysis: PostcardAnalysis) -> list[str]:
+        """Save an identified postcard to the archive.
+
+        A failed save is logged rather than raised, so the poll and the
+        event still go ahead.
+
+        Args:
+            analysis: The identified postcard.
+
+        Returns:
+            The newly written files, relative to the archive folder.
+        """
+        if self.archive is None:
+            return []
+        feeder = analysis.feeder
+        feeder_name = (
+            known.name
+            if feeder and (known := self.client.feeders.get(feeder.id))
+            else None
+        )
+        try:
+            written = await self.archive.async_save_postcard(analysis, feeder_name)
+        except OSError as err:
+            LOGGER.warning("Could not archive postcard %s: %s", analysis.id, err)
+            return []
+        if written:
+            LOGGER.debug("Archived postcard %s: %s", analysis.id, written)
+        return written
+
+    async def async_archive_history(self) -> dict[str, int]:
+        """Save everything Bird Buddy still holds to the archive.
+
+        Covers every species collection and the postcards still in the feed.
+        Items already saved are skipped, so this can run again safely.
+
+        Returns:
+            How many files were saved from the collections and the feed.
+
+        Raises:
+            HomeAssistantError: If the archive isn't set up.
+        """
+        if self.archive is None:
+            msg = "Set an archive folder in the Bird Buddy options first"
+            raise HomeAssistantError(msg)
+        counts = {"collections": 0, "postcards": 0}
+        collections = await self.client.refresh_collections()
+        for collection in collections.values():
+            medias = await self.client.collection(collection.collection_id)
+            try:
+                written = await self.archive.async_save_collection(
+                    collection, list(medias.values())
+                )
+            except OSError as err:
+                LOGGER.warning(
+                    "Could not archive collection %s: %s", collection.bird_name, err
+                )
+                continue
+            counts["collections"] += len(written)
+        for postcard in await self.client.new_postcards():
+            try:
+                analysis = await self.client.identify_postcard(postcard)
+            except CompositeException, GraphqlError, UnexpectedResponseError:
+                LOGGER.exception("Could not identify postcard %s", postcard.node_id)
+                continue
+            counts["postcards"] += len(await self.async_archive_postcard(analysis))
+        LOGGER.info("Bird Buddy archive backfill saved %s", counts)
+        return counts
 
     async def _refresh_feed(self) -> None:
         """Process the feed items newer than the saved cursor, then advance it.
