@@ -179,20 +179,39 @@ class PostcardArchive:
     def _read_index(self) -> dict[str, str]:
         """Read the index from disk (executor).
 
+        A read error is raised, not treated as an empty index, so the index
+        isn't cached empty and later overwritten. An index that isn't valid
+        JSON is set aside as ``.index.json.bad-<time>`` and a new one begun.
+
         Returns:
             The saved index, or an empty one if there is none yet.
+
+        Raises:
+            OSError: If the index exists but can't be read.
         """
         path = self.folder / INDEX_FILE
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError) as err:
-            LOGGER.warning("Could not read the archive index %s: %s", path, err)
+        try:
+            data = json.loads(text)
+        except ValueError as err:
+            data = None
+            problem = str(err)
+        else:
+            problem = "not a JSON object"
+        if not isinstance(data, dict):
+            bad = path.with_name(f"{INDEX_FILE}.bad-{dt_util.utcnow():%Y%m%d%H%M%S}")
+            LOGGER.warning(
+                "The archive index %s is damaged (%s); keeping it as %s",
+                path,
+                problem,
+                bad,
+            )
+            path.replace(bad)
             return {}
-        return (
-            {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-        )
+        return {str(k): str(v) for k, v in data.items()}
 
     async def _async_flush(self) -> None:
         """Write the index if it has unsaved entries.

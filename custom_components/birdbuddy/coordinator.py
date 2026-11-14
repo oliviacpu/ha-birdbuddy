@@ -253,7 +253,12 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         if self.archive is None:
             return
         pending = await self._async_retry_pending()
-        if not await self.archive.async_is_complete(analysis):
+        try:
+            complete = await self.archive.async_is_complete(analysis)
+        except OSError as err:
+            LOGGER.warning("Could not read the archive index: %s", err)
+            complete = False
+        if not complete:
             await self._async_add_retry(analysis.id)
         elif analysis.id in pending:
             del pending[analysis.id]

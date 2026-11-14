@@ -526,3 +526,32 @@ async def test_a_failed_index_write_is_retried(hass, tmp_path, aioclient_mock):
 
     index = json.loads((tmp_path / INDEX_FILE).read_text())
     assert {"m1", "m2"} <= set(index)
+
+
+async def test_an_unreadable_index_is_not_replaced(hass, tmp_path, media_urls):
+    """A read error is raised and retried; the old index survives."""
+    (tmp_path / INDEX_FILE).write_text(json.dumps({"old": "2026/01/01/x.jpg"}))
+    archive = PostcardArchive(hass, tmp_path)
+    analysis = _analysis([_image()], ["Robin"])
+
+    msg = "busy"
+    with (
+        patch.object(archive, "_read_index", side_effect=OSError(msg)),
+        pytest.raises(OSError, match=msg),
+    ):
+        await archive.async_save_postcard(analysis)
+
+    await archive.async_save_postcard(analysis)
+    index = json.loads((tmp_path / INDEX_FILE).read_text())
+    assert {"old", "m1"} <= set(index)
+
+
+async def test_a_damaged_index_is_set_aside(hass, tmp_path, media_urls):
+    """An index that isn't JSON is kept under a new name, not overwritten."""
+    (tmp_path / INDEX_FILE).write_text("{not json")
+    archive = PostcardArchive(hass, tmp_path)
+
+    await archive.async_save_postcard(_analysis([_image()], ["Robin"]))
+
+    assert len(list(tmp_path.glob(f"{INDEX_FILE}.bad-*"))) == 1
+    assert "m1" in json.loads((tmp_path / INDEX_FILE).read_text())
