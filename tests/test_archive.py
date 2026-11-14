@@ -502,3 +502,27 @@ async def test_a_postcard_that_fails_to_identify_is_retried(
 
     key = f"{DOMAIN}.{coordinator.config_entry.entry_id}.archive_retry"
     assert list(hass_storage[key]["data"]["pending"]) == ["pc9"]
+
+
+async def test_a_failed_index_write_is_retried(hass, tmp_path, aioclient_mock):
+    """Unsaved index entries are written on the next save, not lost."""
+    other = f"https://example.invalid/d.jpg?{_FUTURE}"
+    aioclient_mock.get(_PHOTO, content=b"a", headers={"Content-Type": "image/jpeg"})
+    aioclient_mock.get(other, content=b"b", headers={"Content-Type": "image/jpeg"})
+    archive = PostcardArchive(hass, tmp_path)
+    first = _analysis([_image("m1")], ["Robin"])
+
+    msg = "disk full"
+    with (
+        patch.object(archive, "_write_index", side_effect=OSError(msg)),
+        pytest.raises(OSError, match=msg),
+    ):
+        await archive.async_save_postcard(first)
+    assert not await archive.async_is_complete(first)
+    assert not (tmp_path / INDEX_FILE).exists()
+
+    collection = Collection({"id": "c1", "species": {"id": "s1", "name": "Jay"}})
+    await archive.async_save_collection(collection, [Media(_image("m2", other))])
+
+    index = json.loads((tmp_path / INDEX_FILE).read_text())
+    assert {"m1", "m2"} <= set(index)

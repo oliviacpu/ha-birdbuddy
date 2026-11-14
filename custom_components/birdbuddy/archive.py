@@ -161,6 +161,8 @@ class PostcardArchive:
         self.folder = Path(folder)
         self._lock = asyncio.Lock()
         self._index: dict[str, str] | None = None
+        # True while the cached index has entries not yet written to disk.
+        self._dirty = False
 
     async def _async_index(self) -> dict[str, str]:
         """Load the media-id index once.
@@ -191,6 +193,19 @@ class PostcardArchive:
         return (
             {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
         )
+
+    async def _async_flush(self) -> None:
+        """Write the index if it has unsaved entries.
+
+        Raises:
+            OSError: If the write fails; the entries stay unsaved and the
+                next save tries again.
+        """
+        if self._dirty and self._index is not None:
+            await self._hass.async_add_executor_job(
+                self._write_index, dict(self._index)
+            )
+            self._dirty = False
 
     def _write_index(self, index: dict[str, str]) -> None:
         """Write the index to disk atomically (executor).
@@ -321,9 +336,9 @@ class PostcardArchive:
             )
             rel = path.relative_to(self.folder).as_posix()
             index[media.id] = rel
+            self._dirty = True
             written.append(rel)
-        if written:
-            await self._hass.async_add_executor_job(self._write_index, dict(index))
+        await self._async_flush()
         return written
 
     async def async_save_postcard(
@@ -345,6 +360,8 @@ class PostcardArchive:
         label = _species_label(species)
         when = dt_util.as_local(min(m.created_at for m in medias))
         async with self._lock:
+            # Retry any index entries an earlier failed write left unsaved.
+            await self._async_flush()
             written = await self._async_save_media(medias, label, when)
             index = await self._async_index()
             details_key = f"{DETAILS_PREFIX}{analysis.id}"
@@ -376,9 +393,8 @@ class PostcardArchive:
                         content,
                     )
                     index[details_key] = path.relative_to(self.folder).as_posix()
-                    await self._hass.async_add_executor_job(
-                        self._write_index, dict(index)
-                    )
+                    self._dirty = True
+                    await self._async_flush()
         return written
 
     async def async_is_complete(self, analysis: PostcardAnalysis) -> bool:
@@ -391,6 +407,9 @@ class PostcardArchive:
             True when every media item and the details file are in the index.
         """
         index = await self._async_index()
+        if self._dirty:
+            # Saved files whose index entries aren't on disk yet.
+            return False
         if not analysis.medias:
             return True
         return f"{DETAILS_PREFIX}{analysis.id}" in index and all(
@@ -415,6 +434,7 @@ class PostcardArchive:
         label = _species_label([collection.bird_name or ""])
         written: list[str] = []
         async with self._lock:
+            await self._async_flush()
             for media in sorted(medias, key=lambda m: m.created_at):
                 when = dt_util.as_local(media.created_at)
                 written += await self._async_save_media([media], label, when)
