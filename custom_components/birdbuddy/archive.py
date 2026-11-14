@@ -252,6 +252,19 @@ class PostcardArchive:
         temp.replace(path)
         return path
 
+    @staticmethod
+    def _replace_file(path: Path, content: bytes) -> None:
+        """Overwrite a file atomically (executor).
+
+        Args:
+            path: The file.
+            content: Its new bytes.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".part")
+        temp.write_bytes(content)
+        temp.replace(path)
+
     async def _async_download(self, media: Media) -> tuple[bytes, str] | None:
         """Download a media item.
 
@@ -335,9 +348,9 @@ class PostcardArchive:
             index = await self._async_index()
             details_key = f"{DETAILS_PREFIX}{analysis.id}"
             files = [Path(index[m.id]).name for m in medias if m.id in index]
-            # Written once per postcard and tracked on its own, so a retry
-            # writes it even when every media item was saved earlier.
-            if files and details_key not in index:
+            # Tracked on its own, so a retry writes it when it's missing, and
+            # rewrites it in place when the retry saved more of the media.
+            if files and (details_key not in index or written):
                 details: dict[str, Any] = {
                     "postcard_id": analysis.id,
                     "time": when.isoformat(),
@@ -346,15 +359,23 @@ class PostcardArchive:
                     "confidence": analysis.confidence,
                     "files": files,
                 }
-                path = await self._hass.async_add_executor_job(
-                    self._write_file,
-                    self._day_folder(when),
-                    f"{when:%H-%M-%S} {label}",
-                    ".json",
-                    json.dumps(details, indent=1, ensure_ascii=False).encode(),
-                )
-                index[details_key] = path.relative_to(self.folder).as_posix()
-                await self._hass.async_add_executor_job(self._write_index, dict(index))
+                content = json.dumps(details, indent=1, ensure_ascii=False).encode()
+                if existing := index.get(details_key):
+                    await self._hass.async_add_executor_job(
+                        self._replace_file, self.folder / existing, content
+                    )
+                else:
+                    path = await self._hass.async_add_executor_job(
+                        self._write_file,
+                        self._day_folder(when),
+                        f"{when:%H-%M-%S} {label}",
+                        ".json",
+                        content,
+                    )
+                    index[details_key] = path.relative_to(self.folder).as_posix()
+                    await self._hass.async_add_executor_job(
+                        self._write_index, dict(index)
+                    )
         return written
 
     async def async_save_collection(

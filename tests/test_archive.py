@@ -418,3 +418,25 @@ async def test_a_missing_details_file_is_written_on_retry(hass, tmp_path, media_
     day, time = _local_stem()
     details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
     assert details["files"] == [f"{time} American Robin.jpg"]
+
+
+async def test_a_retry_that_saves_more_media_updates_the_details(
+    hass, tmp_path, aioclient_mock
+):
+    """The details file lists media that only a retry managed to save."""
+    other = f"https://example.invalid/d.jpg?{_FUTURE}"
+    aioclient_mock.get(_PHOTO, content=b"a", headers={"Content-Type": "image/jpeg"})
+    aioclient_mock.get(other, status=503)
+    archive = PostcardArchive(hass, tmp_path)
+    analysis = _analysis([_image("m1"), _image("m2", other)], ["Blue Jay"])
+    await archive.async_save_postcard(analysis)
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(other, content=b"b", headers={"Content-Type": "image/jpeg"})
+    written = await archive.async_save_postcard(analysis)
+
+    day, time = _local_stem()
+    assert written == [f"{day}/{time} Blue Jay 2.jpg"]
+    details = json.loads((tmp_path / f"{day}/{time} Blue Jay.json").read_text())
+    assert details["files"] == [f"{time} Blue Jay.jpg", f"{time} Blue Jay 2.jpg"]
+    assert not list((tmp_path / day).glob("*Blue Jay 2.json"))
