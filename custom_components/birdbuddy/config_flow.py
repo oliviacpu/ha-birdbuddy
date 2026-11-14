@@ -16,6 +16,7 @@ from homeassistant.exceptions import OAuth2TokenRequestError
 from homeassistant.helpers import config_entry_oauth2_flow
 import voluptuous as vol
 
+from .archive import normalize_folder
 from .const import (
     AUTH_EMAIL,
     AUTH_GOOGLE,
@@ -215,7 +216,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         current = self.config_entry.options.get(CONF_ARCHIVE_FOLDER, "")
         if user_input is not None:
-            folder = str(user_input.get(CONF_ARCHIVE_FOLDER) or "").strip()
+            folder = normalize_folder(user_input.get(CONF_ARCHIVE_FOLDER))
             if folder and not folder.startswith("/"):
                 errors[CONF_ARCHIVE_FOLDER] = "not_absolute"
             elif folder and not self.hass.config.is_allowed_path(folder):

@@ -18,6 +18,7 @@ from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.json import JsonValueType
 
+from .archive import normalize_folder
 from .const import (
     ATTR_FEEDER_ID,
     AUTH_EMAIL,
@@ -121,7 +122,7 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     running = (
         str(coordinator.archive.folder) if coordinator and coordinator.archive else ""
     )
-    if (entry.options.get(CONF_ARCHIVE_FOLDER) or "") != running:
+    if normalize_folder(entry.options.get(CONF_ARCHIVE_FOLDER)) != running:
         await hass.config_entries.async_reload(entry.entry_id)
 
 

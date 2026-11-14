@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -35,6 +36,8 @@ import homeassistant.util.dt as dt_util
 from .const import LOGGER
 
 INDEX_FILE = ".index.json"
+# hass.data key: one archive per folder, shared by every account that uses it.
+DATA_ARCHIVES = "birdbuddy_archives"
 UNKNOWN_VISITOR = "Unknown visitor"
 
 _CONTENT_TYPES = {
@@ -46,6 +49,40 @@ _CONTENT_TYPES = {
 }
 # Characters that aren't safe in file names on common file systems.
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def normalize_folder(folder: str | None) -> str:
+    """Spell a folder one way, so equal folders compare equal.
+
+    Args:
+        folder: The folder as entered, or None.
+
+    Returns:
+        The normalized path (no trailing slash, no ``..`` or ``//``), or ""
+        when no folder is set.
+    """
+    folder = (folder or "").strip()
+    return os.path.normpath(folder) if folder else ""
+
+
+def get_archive(hass: HomeAssistant, folder: str) -> PostcardArchive:
+    """Return the archive for a folder, shared by every account using it.
+
+    Each archive has one lock and one cached index, so two accounts with the
+    same folder can't overwrite each other's index entries.
+
+    Args:
+        hass: The Home Assistant instance.
+        folder: The archive folder.
+
+    Returns:
+        The folder's archive.
+    """
+    key = normalize_folder(folder)
+    archives: dict[str, PostcardArchive] = hass.data.setdefault(DATA_ARCHIVES, {})
+    if key not in archives:
+        archives[key] = PostcardArchive(hass, key)
+    return archives[key]
 
 
 def _safe_name(text: str) -> str:

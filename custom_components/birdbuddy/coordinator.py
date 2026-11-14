@@ -23,7 +23,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .archive import PostcardArchive
+from .archive import PostcardArchive, get_archive
 from .const import (
     ATTR_FEEDER_ID,
     ATTR_MEDIA,
@@ -66,7 +66,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """
         self.client = client
         self.archive: PostcardArchive | None = (
-            PostcardArchive(hass, folder)
+            get_archive(hass, folder)
             if (folder := entry.options.get(CONF_ARCHIVE_FOLDER))
             else None
         )

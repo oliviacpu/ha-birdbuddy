@@ -355,3 +355,38 @@ async def test_only_a_folder_change_reloads(hass, tmp_path):
 def test_the_archive_folder_is_a_path(hass, tmp_path):
     """The archive keeps its folder as a Path."""
     assert PostcardArchive(hass, str(tmp_path)).folder == tmp_path
+
+
+async def test_a_trailing_slash_does_not_cause_reloads(hass, tmp_path):
+    """The same folder spelled with a trailing slash isn't a change."""
+    coordinator = _coordinator(hass, None)
+    entry = coordinator.config_entry
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_ARCHIVE_FOLDER: f"{tmp_path}/"}
+    )
+    coordinator = BirdBuddyDataUpdateCoordinator(hass, coordinator.client, entry)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    with patch.object(hass.config_entries, "async_reload", AsyncMock()) as reload:
+        await _async_options_updated(hass, entry)
+    reload.assert_not_awaited()
+
+
+async def test_accounts_sharing_a_folder_share_one_archive(hass, tmp_path):
+    """Two accounts with the same folder use one archive, so one index."""
+    first = _coordinator(hass, tmp_path)
+    second = _coordinator(hass, Path(f"{tmp_path}/./"))
+    assert first.archive is second.archive
+
+
+async def test_options_flow_normalizes_the_folder(hass, tmp_path):
+    """A trailing slash is dropped before the folder is saved."""
+    hass.config.allowlist_external_dirs = {str(tmp_path)}
+    entry = MockConfigEntry(domain=DOMAIN, data={}, version=2)
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_ARCHIVE_FOLDER: f"{tmp_path}/birds/"}
+    )
+    assert entry.options == {CONF_ARCHIVE_FOLDER: f"{tmp_path}/birds"}
