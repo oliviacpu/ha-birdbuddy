@@ -381,6 +381,22 @@ class PostcardArchive:
                     )
         return written
 
+    async def async_is_complete(self, analysis: PostcardAnalysis) -> bool:
+        """Report whether a postcard's media and details file are all saved.
+
+        Args:
+            analysis: The identified postcard.
+
+        Returns:
+            True when every media item and the details file are in the index.
+        """
+        index = await self._async_index()
+        if not analysis.medias:
+            return True
+        return f"{DETAILS_PREFIX}{analysis.id}" in index and all(
+            m.id in index for m in analysis.medias
+        )
+
     async def async_save_collection(
         self, collection: Collection, medias: list[Media]
     ) -> list[str]:

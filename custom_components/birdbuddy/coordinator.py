@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from birdbuddy.client import BirdBuddy
@@ -22,6 +22,7 @@ from homeassistant.core import CALLBACK_TYPE, EventOrigin, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+import homeassistant.util.dt as dt_util
 
 from .archive import PostcardArchive, get_archive
 from .const import (
@@ -41,6 +42,10 @@ from .repairs import async_check_legacy_event_listeners
 from .visitors import RecentVisitors, VisitorCallback
 
 FEED_CURSOR_STORE_VERSION = 1
+ARCHIVE_RETRY_STORE_VERSION = 1
+# How long a postcard whose archive save failed keeps being retried. Bird
+# Buddy keeps uncollected postcards in the feed for about this long.
+ARCHIVE_RETRY_FOR = timedelta(days=7)
 
 
 class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
@@ -80,6 +85,15 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         self._feed_cursor_loaded = False
         self._feed_cursor: Store[dict[str, Any]] = Store(
             hass, FEED_CURSOR_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.feed_cursor"
+        )
+        # Postcards whose archive save is incomplete, by id, with when it
+        # first failed. Kept apart from the feed cursor, so a retry never
+        # fires the postcard event again.
+        self._archive_retry: dict[str, str] | None = None
+        self._archive_retry_store: Store[dict[str, Any]] = Store(
+            hass,
+            ARCHIVE_RETRY_STORE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.archive_retry",
         )
         super().__init__(
             hass,
@@ -155,6 +169,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
                 # reads the account data the refresh already returned, so keep
                 # the poll successful and carry on with the next postcard.
                 LOGGER.exception("Could not identify postcard %s", postcard.node_id)
+                await self._async_add_retry(postcard.node_id)
                 continue
             if self.archive is not None:
                 await self.async_archive_postcard(analysis)
@@ -193,14 +208,80 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             if feeder and (known := self.client.feeders.get(feeder.id))
             else None
         )
+        written: list[str] = []
         try:
             written = await self.archive.async_save_postcard(analysis, feeder_name)
         except OSError as err:
             LOGGER.warning("Could not archive postcard %s: %s", analysis.id, err)
-            return []
         if written:
             LOGGER.debug("Archived postcard %s: %s", analysis.id, written)
+        await self._async_track_archive(analysis)
         return written
+
+    async def _async_retry_pending(self) -> dict[str, str]:
+        """Load the archive retry list once.
+
+        Returns:
+            Postcard id to when its save first failed (ISO time).
+        """
+        pending = self._archive_retry
+        if pending is None:
+            stored = await self._archive_retry_store.async_load()
+            pending = dict((stored or {}).get("pending") or {})
+            self._archive_retry = pending
+        return pending
+
+    async def _async_add_retry(self, postcard_id: str) -> None:
+        """Put a postcard on the retry list, when the archive is on.
+
+        Args:
+            postcard_id: The postcard's feed-item id.
+        """
+        if self.archive is None:
+            return
+        pending = await self._async_retry_pending()
+        if postcard_id not in pending:
+            pending[postcard_id] = dt_util.utcnow().isoformat()
+            await self._archive_retry_store.async_save({"pending": pending})
+
+    async def _async_track_archive(self, analysis: PostcardAnalysis) -> None:
+        """Add an incompletely saved postcard to the retry list, or clear it.
+
+        Args:
+            analysis: The postcard that was just saved.
+        """
+        if self.archive is None:
+            return
+        pending = await self._async_retry_pending()
+        if not await self.archive.async_is_complete(analysis):
+            await self._async_add_retry(analysis.id)
+        elif analysis.id in pending:
+            del pending[analysis.id]
+            await self._archive_retry_store.async_save({"pending": pending})
+
+    async def _async_retry_archive(self) -> None:
+        """Try again to save postcards whose earlier save was incomplete.
+
+        Gives up on a postcard a week after its first failure. Identifying a
+        postcard again returns fresh media links and doesn't fire the event.
+        """
+        if self.archive is None:
+            return
+        pending = await self._async_retry_pending()
+        cutoff = dt_util.utcnow() - ARCHIVE_RETRY_FOR
+        for postcard_id, since in list(pending.items()):
+            first = dt_util.parse_datetime(since)
+            if first is None or first < cutoff:
+                LOGGER.warning("Giving up archiving postcard %s", postcard_id)
+                del pending[postcard_id]
+                await self._archive_retry_store.async_save({"pending": pending})
+                continue
+            try:
+                analysis = await self.client.identify_postcard(postcard_id)
+            except CompositeException, GraphqlError, UnexpectedResponseError:
+                LOGGER.debug("Could not identify postcard %s for a retry", postcard_id)
+                continue
+            await self.async_archive_postcard(analysis)
 
     async def async_archive_history(self) -> dict[str, int]:
         """Save everything Bird Buddy still holds to the archive.
@@ -288,6 +369,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             # This delays the first postcard handling until the next update.
             if not self.first_update:
                 await self._refresh_feed()
+                await self._async_retry_archive()
         except (AuthenticationFailedError, AuthTokenExpiredError) as exc:
             msg = "Bird Buddy sign-in must be renewed"
             raise ConfigEntryAuthFailed(msg) from exc

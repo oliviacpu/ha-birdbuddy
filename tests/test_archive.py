@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from birdbuddy.exceptions import GraphqlError
 from birdbuddy.feed import FeedNode
 from birdbuddy.media import Collection, Media
 from birdbuddy.postcards import PostcardAnalysis
@@ -440,3 +441,64 @@ async def test_a_retry_that_saves_more_media_updates_the_details(
         f"{day}/{time} Blue Jay 2.jpg",
     ]
     assert not list((tmp_path / day).glob("*Blue Jay 2.json"))
+
+
+async def test_a_failed_download_is_retried_on_later_polls(
+    hass, tmp_path, aioclient_mock, hass_storage
+):
+    """An incomplete save is retried, without firing the event again."""
+    aioclient_mock.get(_PHOTO, status=503)
+    coordinator = _coordinator(hass, tmp_path)
+    analysis = _analysis([_image()], ["American Robin"])
+    coordinator.client.identify_postcard = AsyncMock(return_value=analysis)
+    events = []
+    hass.bus.async_listen("birdbuddy_new_postcard", events.append)
+
+    postcard = FeedNode({"__typename": "FeedItemNewPostcard", "id": "pc1"})
+    await coordinator._process_feed([postcard])
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    key = f"{DOMAIN}.{coordinator.config_entry.entry_id}.archive_retry"
+    assert list(hass_storage[key]["data"]["pending"]) == ["pc1"]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(_PHOTO, content=b"a", headers={"Content-Type": "image/jpeg"})
+    await coordinator._async_retry_archive()
+    await hass.async_block_till_done()
+
+    coordinator.client.identify_postcard.assert_awaited_with("pc1")
+    assert hass_storage[key]["data"]["pending"] == {}
+    assert len(events) == 1
+    day, time = _local_stem()
+    assert (tmp_path / f"{day}/{time} American Robin.jpg").read_bytes() == b"a"
+
+
+async def test_an_old_retry_is_given_up(hass, tmp_path, hass_storage):
+    """A postcard still failing after a week is dropped from the list."""
+    coordinator = _coordinator(hass, tmp_path)
+    key = f"{DOMAIN}.{coordinator.config_entry.entry_id}.archive_retry"
+    hass_storage[key] = {
+        "version": 1,
+        "key": key,
+        "data": {"pending": {"old": "2020-01-01T00:00:00+00:00"}},
+    }
+    coordinator.client.identify_postcard = AsyncMock()
+
+    await coordinator._async_retry_archive()
+
+    coordinator.client.identify_postcard.assert_not_awaited()
+    assert hass_storage[key]["data"]["pending"] == {}
+
+
+async def test_a_postcard_that_fails_to_identify_is_retried(
+    hass, tmp_path, hass_storage
+):
+    """A rejected identify call puts the postcard on the retry list."""
+    coordinator = _coordinator(hass, tmp_path)
+    coordinator.client.identify_postcard = AsyncMock(side_effect=GraphqlError({}))
+
+    postcard = FeedNode({"__typename": "FeedItemNewPostcard", "id": "pc9"})
+    await coordinator._process_feed([postcard])
+
+    key = f"{DOMAIN}.{coordinator.config_entry.entry_id}.archive_retry"
+    assert list(hass_storage[key]["data"]["pending"]) == ["pc9"]
