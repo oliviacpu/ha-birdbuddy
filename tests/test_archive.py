@@ -750,6 +750,7 @@ async def test_a_quick_gallery_sync_stops_at_a_saved_page(hass, tmp_path):
         patch.object(archive, "async_known", AsyncMock(return_value=True)),
         patch.object(archive, "async_save_items", AsyncMock(return_value=[])) as save,
     ):
+        coordinator._gallery_complete = True
         assert await coordinator.async_sync_gallery() == 0
         assert save.await_count == 1
         await coordinator.async_sync_gallery(full=True)
@@ -770,3 +771,60 @@ async def test_a_failed_gallery_check_waits_for_the_next_due_time(hass, tmp_path
     with patch.object(coordinator, "async_sync_gallery", failing):
         await coordinator._async_sync_gallery_if_due()
     assert failing.await_count == 2
+
+
+async def test_a_gap_in_the_gallery_makes_the_next_sync_read_it_all(
+    hass, tmp_path, hass_storage
+):
+    """After a failed download, a quick sync doesn't stop at a saved page."""
+    coordinator = _coordinator(hass, tmp_path)
+    archive = coordinator.archive
+    assert archive is not None
+    pages = [[(["Blue Jay"], Media(_image("m1")))], [(["Robin"], Media(_image("m2")))]]
+    reads: list[int] = []
+
+    async def gallery(_client):
+        for i, page in enumerate(pages):
+            reads.append(i)
+            yield page
+
+    saved = {"m1"}
+
+    async def known(ids):
+        return all(i in saved for i in ids)
+
+    with (
+        patch("custom_components.birdbuddy.coordinator.async_gallery_pages", gallery),
+        patch.object(archive, "async_known", side_effect=known),
+        patch.object(archive, "async_save_items", AsyncMock(return_value=[])),
+    ):
+        # m2 fails to download: the sync is left incomplete.
+        await coordinator.async_sync_gallery(full=True)
+        assert await coordinator._async_gallery_complete() is False
+        reads.clear()
+        await coordinator.async_sync_gallery()
+        assert reads == [0, 1]  # read past the saved first page
+
+        saved.add("m2")
+        await coordinator.async_sync_gallery()
+        assert await coordinator._async_gallery_complete() is True
+        reads.clear()
+        await coordinator.async_sync_gallery()
+        assert reads == [0]  # now a quick sync stops at the saved page
+
+
+async def test_a_failed_gallery_request_marks_the_sync_incomplete(hass, tmp_path):
+    """A request error leaves the gallery marked incomplete."""
+    coordinator = _coordinator(hass, tmp_path)
+    coordinator._gallery_complete = True
+
+    async def gallery(_client):
+        raise GraphqlError({})
+        yield  # pragma: no cover
+
+    with (
+        patch("custom_components.birdbuddy.coordinator.async_gallery_pages", gallery),
+        pytest.raises(GraphqlError),
+    ):
+        await coordinator.async_sync_gallery()
+    assert await coordinator._async_gallery_complete() is False

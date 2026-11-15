@@ -45,6 +45,7 @@ from .visitors import RecentVisitors, VisitorCallback
 
 FEED_CURSOR_STORE_VERSION = 1
 ARCHIVE_RETRY_STORE_VERSION = 1
+GALLERY_STORE_VERSION = 1
 # How long a postcard whose archive save failed keeps being retried. Bird
 # Buddy keeps uncollected postcards in the feed for about this long.
 ARCHIVE_RETRY_FOR = timedelta(days=7)
@@ -104,6 +105,12 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         self._archive_retry: dict[str, str] | None = None
         # When the gallery was last checked; None until the first poll does.
         self._gallery_synced: datetime | None = None
+        # Whether the last gallery sync saved everything it read; None until
+        # loaded. Kept on disk, so a gap found before a restart is retried.
+        self._gallery_complete: bool | None = None
+        self._gallery_store: Store[dict[str, Any]] = Store(
+            hass, GALLERY_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.gallery"
+        )
         self._archive_retry_store: Store[dict[str, Any]] = Store(
             hass,
             ARCHIVE_RETRY_STORE_VERSION,
@@ -376,8 +383,11 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """Save the gallery's photos and videos that aren't saved yet.
 
         The gallery holds everything the account owns, newest first. A
-        quick sync stops at the first page that was already fully saved;
-        a full sync reads every page.
+        quick sync stops at the first page that was already fully saved,
+        but only when the sync before it read the gallery without gaps:
+        after a failed download or request, the next sync reads every page,
+        so missing media further back is tried again. A full sync always
+        reads every page.
 
         Args:
             full: Read the whole gallery instead of stopping early.
@@ -387,14 +397,45 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """
         if self.archive is None:
             return 0
+        quick = not full and await self._async_gallery_complete()
+        complete = False
         saved = 0
-        async for page in async_gallery_pages(self.client):
-            known = await self.archive.async_known([m.id for _, m in page])
-            saved += len(await self._async_archive_items(page))
-            if known and not full:
-                break
-        self._gallery_synced = dt_util.utcnow()
+        try:
+            gaps = False
+            async for page in async_gallery_pages(self.client):
+                ids = [m.id for _, m in page]
+                known = await self.archive.async_known(ids)
+                saved += len(await self._async_archive_items(page))
+                if not known and not await self.archive.async_known(ids):
+                    gaps = True
+                if known and quick:
+                    break
+            complete = not gaps
+        finally:
+            self._gallery_synced = dt_util.utcnow()
+            await self._async_set_gallery_complete(complete)
         return saved
+
+    async def _async_gallery_complete(self) -> bool:
+        """Report whether the last gallery sync left no media unsaved.
+
+        Returns:
+            True when it read the gallery without gaps.
+        """
+        if self._gallery_complete is None:
+            stored = await self._gallery_store.async_load()
+            self._gallery_complete = bool((stored or {}).get("complete"))
+        return self._gallery_complete
+
+    async def _async_set_gallery_complete(self, complete: bool) -> None:
+        """Record whether the gallery sync left no media unsaved.
+
+        Args:
+            complete: True when it read the gallery without gaps.
+        """
+        if complete != self._gallery_complete:
+            self._gallery_complete = complete
+            await self._gallery_store.async_save({"complete": complete})
 
     async def _async_sync_gallery_if_due(self) -> None:
         """Check the gallery every few hours, without failing the poll."""
