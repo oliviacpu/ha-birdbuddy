@@ -52,6 +52,9 @@ ARCHIVE_RETRY_FOR = timedelta(days=7)
 # How often the archive checks the gallery for media it doesn't have yet,
 # such as a postcard opened in the app before a poll saw it.
 GALLERY_SYNC_EVERY = timedelta(hours=6)
+# How far past the last complete sync's newest item a quick sync reads, for
+# a visit taken earlier but added to the gallery later (collected late).
+GALLERY_LOOKBACK = timedelta(days=2)
 # Errors from one Bird Buddy request that shouldn't fail the whole poll.
 _REQUEST_ERRORS = (
     CompositeException,
@@ -105,9 +108,11 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         self._archive_retry: dict[str, str] | None = None
         # When the gallery was last checked; None until the first poll does.
         self._gallery_synced: datetime | None = None
-        # Whether the last gallery sync saved everything it read; None until
-        # loaded. Kept on disk, so a gap found before a restart is retried.
-        self._gallery_complete: bool | None = None
+        # The newest item the last complete gallery sync saw: everything
+        # older is saved. None after a sync with gaps, so the next one reads
+        # the whole gallery. Kept on disk across restarts.
+        self._gallery_frontier: datetime | None = None
+        self._gallery_loaded = False
         self._gallery_store: Store[dict[str, Any]] = Store(
             hass, GALLERY_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.gallery"
         )
@@ -383,10 +388,10 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """Save the gallery's photos and videos that aren't saved yet.
 
         The gallery holds everything the account owns, newest first. A
-        quick sync stops at the first page that was already fully saved,
-        but only when the sync before it read the gallery without gaps:
-        after a failed download or request, the next sync reads every page,
-        so missing media further back is tried again. A full sync always
+        quick sync reads back to a couple of days before the newest item the
+        last complete sync saw, then stops; anything older was covered then.
+        After a sync with gaps (a failed download or request) there is no
+        such point, so the next sync reads every page. A full sync always
         reads every page.
 
         Args:
@@ -397,45 +402,55 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         """
         if self.archive is None:
             return 0
-        quick = not full and await self._async_gallery_complete()
+        frontier = None if full else await self._async_gallery_frontier()
+        newest: datetime | None = None
         complete = False
         saved = 0
         try:
             gaps = False
             async for page in async_gallery_pages(self.client):
-                ids = [m.id for _, m in page]
-                known = await self.archive.async_known(ids)
+                if not page:
+                    continue
+                times = [m.created_at for _, m in page]
+                newest = max(newest or times[0], *times)
                 saved += len(await self._async_archive_items(page))
-                if not known and not await self.archive.async_known(ids):
+                if not await self.archive.async_known([m.id for _, m in page]):
                     gaps = True
-                if known and quick:
+                if frontier is not None and min(times) <= frontier - GALLERY_LOOKBACK:
                     break
             complete = not gaps
         finally:
             self._gallery_synced = dt_util.utcnow()
-            await self._async_set_gallery_complete(complete)
+            if complete and frontier is not None:
+                newest = max(newest or frontier, frontier)
+            await self._async_set_gallery_frontier(newest if complete else None)
         return saved
 
-    async def _async_gallery_complete(self) -> bool:
-        """Report whether the last gallery sync left no media unsaved.
+    async def _async_gallery_frontier(self) -> datetime | None:
+        """Return the newest item the last complete gallery sync saw.
 
         Returns:
-            True when it read the gallery without gaps.
+            Its time, or None when the last sync had gaps or there was none.
         """
-        if self._gallery_complete is None:
+        if not self._gallery_loaded:
             stored = await self._gallery_store.async_load()
-            self._gallery_complete = bool((stored or {}).get("complete"))
-        return self._gallery_complete
+            newest = (stored or {}).get("newest")
+            self._gallery_frontier = dt_util.parse_datetime(newest) if newest else None
+            self._gallery_loaded = True
+        return self._gallery_frontier
 
-    async def _async_set_gallery_complete(self, complete: bool) -> None:
-        """Record whether the gallery sync left no media unsaved.
+    async def _async_set_gallery_frontier(self, newest: datetime | None) -> None:
+        """Record how far back the gallery is fully saved.
 
         Args:
-            complete: True when it read the gallery without gaps.
+            newest: The newest item a complete sync saw, or None after gaps.
         """
-        if complete != self._gallery_complete:
-            self._gallery_complete = complete
-            await self._gallery_store.async_save({"complete": complete})
+        self._gallery_loaded = True
+        if newest != self._gallery_frontier:
+            self._gallery_frontier = newest
+            await self._gallery_store.async_save(
+                {"newest": newest.isoformat() if newest else None}
+            )
 
     async def _async_sync_gallery_if_due(self) -> None:
         """Check the gallery every few hours, without failing the poll."""

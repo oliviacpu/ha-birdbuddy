@@ -26,6 +26,7 @@ from custom_components.birdbuddy.const import (
     SERVICE_ARCHIVE_HISTORY,
 )
 from custom_components.birdbuddy.coordinator import (
+    GALLERY_LOOKBACK,
     GALLERY_SYNC_EVERY,
     BirdBuddyDataUpdateCoordinator,
 )
@@ -734,27 +735,57 @@ async def test_opened_postcards_in_the_feed_are_archived(hass, tmp_path, media_u
     assert (tmp_path / f"{day}/{time} Northern Cardinal.jpg").read_bytes() == b"jpeg"
 
 
-async def test_a_quick_gallery_sync_stops_at_a_saved_page(hass, tmp_path):
-    """A quick sync stops at the first fully saved page; a full one doesn't."""
+_NEW = "2026-11-14T20:00:00.000Z"
+_OLD = "2026-10-01T15:00:00.000Z"
+
+
+def _parse(text: str):
+    parsed = dt_util.parse_datetime(text)
+    assert parsed is not None
+    return parsed
+
+
+async def test_a_quick_gallery_sync_stops_at_the_last_frontier(hass, tmp_path):
+    """A quick sync reads back to the last complete sync, then stops."""
     coordinator = _coordinator(hass, tmp_path)
     archive = coordinator.archive
     assert archive is not None
-    pages = [[(["Blue Jay"], Media(_image("m1")))], [(["Robin"], Media(_image("m2")))]]
+    pages = [
+        [(["Blue Jay"], Media(_image("m1", taken=_NEW)))],
+        [(["Robin"], Media(_image("m2", taken=_TAKEN)))],
+        [(["Robin"], Media(_image("m3", taken=_OLD)))],
+    ]
+    reads: list[int] = []
 
     async def gallery(_client):
-        for page in pages:
+        for i, page in enumerate(pages):
+            reads.append(i)
             yield page
 
     with (
         patch("custom_components.birdbuddy.coordinator.async_gallery_pages", gallery),
         patch.object(archive, "async_known", AsyncMock(return_value=True)),
-        patch.object(archive, "async_save_items", AsyncMock(return_value=[])) as save,
+        patch.object(archive, "async_save_items", AsyncMock(return_value=[])),
     ):
-        coordinator._gallery_complete = True
-        assert await coordinator.async_sync_gallery() == 0
-        assert save.await_count == 1
+        await coordinator.async_sync_gallery()  # no frontier yet: reads it all
+        assert reads == [0, 1, 2]
+        frontier = await coordinator._async_gallery_frontier()
+        assert frontier is not None
+        assert frontier == dt_util.parse_datetime(_NEW)
+
+        # A saved newest page doesn't end the sync: only the frontier does.
+        coordinator._gallery_frontier = dt_util.parse_datetime(_TAKEN)
+        assert coordinator._gallery_frontier is not None
+        coordinator._gallery_frontier += GALLERY_LOOKBACK
+        kept = coordinator._gallery_frontier
+        reads.clear()
+        await coordinator.async_sync_gallery()
+        assert reads == [0, 1]
+        assert await coordinator._async_gallery_frontier() == max(kept, frontier)
+
+        reads.clear()
         await coordinator.async_sync_gallery(full=True)
-        assert save.await_count == 3
+        assert reads == [0, 1, 2]
 
 
 async def test_a_failed_gallery_check_waits_for_the_next_due_time(hass, tmp_path):
@@ -776,11 +807,14 @@ async def test_a_failed_gallery_check_waits_for_the_next_due_time(hass, tmp_path
 async def test_a_gap_in_the_gallery_makes_the_next_sync_read_it_all(
     hass, tmp_path, hass_storage
 ):
-    """After a failed download, a quick sync doesn't stop at a saved page."""
+    """After a failed download, the next quick sync reads every page."""
     coordinator = _coordinator(hass, tmp_path)
     archive = coordinator.archive
     assert archive is not None
-    pages = [[(["Blue Jay"], Media(_image("m1")))], [(["Robin"], Media(_image("m2")))]]
+    pages = [
+        [(["Blue Jay"], Media(_image("m1", taken=_NEW)))],
+        [(["Robin"], Media(_image("m2", taken=_OLD)))],
+    ]
     reads: list[int] = []
 
     async def gallery(_client):
@@ -793,30 +827,35 @@ async def test_a_gap_in_the_gallery_makes_the_next_sync_read_it_all(
     async def known(ids):
         return all(i in saved for i in ids)
 
+    coordinator._gallery_frontier = dt_util.parse_datetime(_NEW)
+    coordinator._gallery_loaded = True
     with (
         patch("custom_components.birdbuddy.coordinator.async_gallery_pages", gallery),
         patch.object(archive, "async_known", side_effect=known),
         patch.object(archive, "async_save_items", AsyncMock(return_value=[])),
     ):
-        # m2 fails to download: the sync is left incomplete.
-        await coordinator.async_sync_gallery(full=True)
-        assert await coordinator._async_gallery_complete() is False
+        await coordinator.async_sync_gallery(full=True)  # m2 fails to download
+        assert await coordinator._async_gallery_frontier() is None
         reads.clear()
         await coordinator.async_sync_gallery()
-        assert reads == [0, 1]  # read past the saved first page
+        assert reads == [0, 1]
 
         saved.add("m2")
         await coordinator.async_sync_gallery()
-        assert await coordinator._async_gallery_complete() is True
+        assert await coordinator._async_gallery_frontier() == dt_util.parse_datetime(
+            _NEW
+        )
         reads.clear()
+        coordinator._gallery_frontier = _parse(_NEW) + GALLERY_LOOKBACK
         await coordinator.async_sync_gallery()
-        assert reads == [0]  # now a quick sync stops at the saved page
+        assert reads == [0]
 
 
-async def test_a_failed_gallery_request_marks_the_sync_incomplete(hass, tmp_path):
-    """A request error leaves the gallery marked incomplete."""
+async def test_a_failed_gallery_request_clears_the_frontier(hass, tmp_path):
+    """A request error makes the next sync read the whole gallery."""
     coordinator = _coordinator(hass, tmp_path)
-    coordinator._gallery_complete = True
+    coordinator._gallery_frontier = dt_util.parse_datetime(_NEW)
+    coordinator._gallery_loaded = True
 
     async def gallery(_client):
         raise GraphqlError({})
@@ -827,4 +866,4 @@ async def test_a_failed_gallery_request_marks_the_sync_incomplete(hass, tmp_path
         pytest.raises(GraphqlError),
     ):
         await coordinator.async_sync_gallery()
-    assert await coordinator._async_gallery_complete() is False
+    assert await coordinator._async_gallery_frontier() is None
