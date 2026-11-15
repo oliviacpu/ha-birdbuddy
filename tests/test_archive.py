@@ -867,3 +867,19 @@ async def test_a_failed_gallery_request_clears_the_frontier(hass, tmp_path):
     ):
         await coordinator.async_sync_gallery()
     assert await coordinator._async_gallery_frontier() is None
+
+
+async def test_the_gallery_frontier_belongs_to_its_folder(hass, tmp_path, hass_storage):
+    """A new archive folder ignores the old folder's frontier."""
+    coordinator = _coordinator(hass, tmp_path / "old")
+    await coordinator._async_set_gallery_frontier(_parse(_NEW))
+    await hass.async_block_till_done()
+    stored = coordinator._gallery_store
+
+    same = _coordinator(hass, tmp_path / "old")
+    same._gallery_store = stored
+    assert await same._async_gallery_frontier() == _parse(_NEW)
+
+    moved = _coordinator(hass, tmp_path / "new")
+    moved._gallery_store = stored
+    assert await moved._async_gallery_frontier() is None

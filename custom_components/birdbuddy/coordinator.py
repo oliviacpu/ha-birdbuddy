@@ -433,9 +433,15 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             Its time, or None when the last sync had gaps or there was none.
         """
         if not self._gallery_loaded:
-            stored = await self._gallery_store.async_load()
-            newest = (stored or {}).get("newest")
-            self._gallery_frontier = dt_util.parse_datetime(newest) if newest else None
+            stored = await self._gallery_store.async_load() or {}
+            newest = stored.get("newest")
+            # Only the folder it was saved for: a new folder starts empty.
+            same_folder = self.archive is not None and stored.get("folder") == str(
+                self.archive.folder
+            )
+            self._gallery_frontier = (
+                dt_util.parse_datetime(newest) if newest and same_folder else None
+            )
             self._gallery_loaded = True
         return self._gallery_frontier
 
@@ -449,7 +455,10 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         if newest != self._gallery_frontier:
             self._gallery_frontier = newest
             await self._gallery_store.async_save(
-                {"newest": newest.isoformat() if newest else None}
+                {
+                    "folder": str(self.archive.folder) if self.archive else None,
+                    "newest": newest.isoformat() if newest else None,
+                }
             )
 
     async def _async_sync_gallery_if_due(self) -> None:
