@@ -11,11 +11,12 @@ from birdbuddy.exceptions import (
     AuthTokenExpiredError,
     CompositeException,
     GraphqlError,
+    NoResponseError,
     UnexpectedResponseError,
 )
 from birdbuddy.feed import FeedNode, FeedNodeType
 from birdbuddy.feeder import Feeder
-from birdbuddy.media import Collection
+from birdbuddy.media import Collection, Media
 from birdbuddy.postcards import PostcardAnalysis
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, EventOrigin, HomeAssistant
@@ -38,14 +39,29 @@ from .const import (
     POLLING_INTERVAL,
 )
 from .device import BirdBuddyDevice
+from .gallery import async_feed_media, async_gallery_pages, feed_item_media
 from .repairs import async_check_legacy_event_listeners
 from .visitors import RecentVisitors, VisitorCallback
 
 FEED_CURSOR_STORE_VERSION = 1
 ARCHIVE_RETRY_STORE_VERSION = 1
+GALLERY_STORE_VERSION = 1
 # How long a postcard whose archive save failed keeps being retried. Bird
 # Buddy keeps uncollected postcards in the feed for about this long.
 ARCHIVE_RETRY_FOR = timedelta(days=7)
+# How often the archive checks the gallery for media it doesn't have yet,
+# such as a postcard opened in the app before a poll saw it.
+GALLERY_SYNC_EVERY = timedelta(hours=6)
+# How far past the last complete sync's newest item a quick sync reads, for
+# a visit taken earlier but added to the gallery later (collected late).
+GALLERY_LOOKBACK = timedelta(days=2)
+# Errors from one Bird Buddy request that shouldn't fail the whole poll.
+_REQUEST_ERRORS = (
+    CompositeException,
+    GraphqlError,
+    NoResponseError,
+    UnexpectedResponseError,
+)
 
 
 class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
@@ -90,6 +106,16 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         # first failed. Kept apart from the feed cursor, so a retry never
         # fires the postcard event again.
         self._archive_retry: dict[str, str] | None = None
+        # When the gallery was last checked; None until the first poll does.
+        self._gallery_synced: datetime | None = None
+        # The newest item the last complete gallery sync saw: everything
+        # older is saved. None after a sync with gaps, so the next one reads
+        # the whole gallery. Kept on disk across restarts.
+        self._gallery_frontier: datetime | None = None
+        self._gallery_loaded = False
+        self._gallery_store: Store[dict[str, Any]] = Store(
+            hass, GALLERY_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.gallery"
+        )
         self._archive_retry_store: Store[dict[str, Any]] = Store(
             hass,
             ARCHIVE_RETRY_STORE_VERSION,
@@ -147,6 +173,13 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             ):
                 LOGGER.info("Recently unlocked species: %s", c.bird_name)
                 self.client.collections.setdefault(c.collection_id, c)
+
+        if self.archive is not None:
+            # Opened postcards, sightings and mystery visitors carry their
+            # media in the feed item itself, so no identify call is needed.
+            await self._async_archive_items(
+                [item for node in feed for item in feed_item_media(node)]
+            )
 
         LOGGER.debug("Found postcards %s", postcards)
         for postcard in postcards:
@@ -291,8 +324,9 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
     async def async_archive_history(self) -> dict[str, int]:
         """Save everything Bird Buddy still holds to the archive.
 
-        Covers every species collection and the postcards still in the feed.
-        Items already saved are skipped, so this can run again safely.
+        Covers the whole gallery, every species collection, the media in
+        every feed item and the postcards still in the feed. Items already
+        saved are skipped, so this can run again safely.
 
         Returns:
             How many files were saved from the collections and the feed.
@@ -303,7 +337,11 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
         if self.archive is None:
             msg = "Set an archive folder in the Bird Buddy options first"
             raise HomeAssistantError(msg)
-        counts = {"collections": 0, "postcards": 0}
+        counts = {"gallery": 0, "collections": 0, "feed": 0, "postcards": 0}
+        counts["gallery"] = await self.async_sync_gallery(full=True)
+        counts["feed"] = len(
+            await self._async_archive_items(await async_feed_media(self.client))
+        )
         collections = await self.client.refresh_collections()
         for collection in collections.values():
             medias = await self.client.collection(collection.collection_id)
@@ -326,6 +364,117 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             counts["postcards"] += len(await self.async_archive_postcard(analysis))
         LOGGER.info("Bird Buddy archive backfill saved %s", counts)
         return counts
+
+    async def _async_archive_items(
+        self, items: list[tuple[list[str], Media]]
+    ) -> list[str]:
+        """Save media that carry their own species, logging a failed save.
+
+        Args:
+            items: The species names and the media of each item.
+
+        Returns:
+            The newly written files, relative to the archive folder.
+        """
+        if self.archive is None or not items:
+            return []
+        try:
+            return await self.archive.async_save_items(items)
+        except OSError as err:
+            LOGGER.warning("Could not archive Bird Buddy media: %s", err)
+            return []
+
+    async def async_sync_gallery(self, *, full: bool = False) -> int:
+        """Save the gallery's photos and videos that aren't saved yet.
+
+        The gallery holds everything the account owns, newest first. A
+        quick sync reads back to a couple of days before the newest item the
+        last complete sync saw, then stops; anything older was covered then.
+        After a sync with gaps (a failed download or request) there is no
+        such point, so the next sync reads every page. A full sync always
+        reads every page.
+
+        Args:
+            full: Read the whole gallery instead of stopping early.
+
+        Returns:
+            How many files were saved.
+        """
+        if self.archive is None:
+            return 0
+        frontier = None if full else await self._async_gallery_frontier()
+        newest: datetime | None = None
+        complete = False
+        saved = 0
+        try:
+            gaps = False
+            async for page in async_gallery_pages(self.client):
+                if not page:
+                    continue
+                times = [m.created_at for _, m in page]
+                newest = max(newest or times[0], *times)
+                saved += len(await self._async_archive_items(page))
+                if not await self.archive.async_known([m.id for _, m in page]):
+                    gaps = True
+                if frontier is not None and min(times) <= frontier - GALLERY_LOOKBACK:
+                    break
+            complete = not gaps
+        finally:
+            self._gallery_synced = dt_util.utcnow()
+            if complete and frontier is not None:
+                newest = max(newest or frontier, frontier)
+            await self._async_set_gallery_frontier(newest if complete else None)
+        return saved
+
+    async def _async_gallery_frontier(self) -> datetime | None:
+        """Return the newest item the last complete gallery sync saw.
+
+        Returns:
+            Its time, or None when the last sync had gaps or there was none.
+        """
+        if not self._gallery_loaded:
+            stored = await self._gallery_store.async_load() or {}
+            newest = stored.get("newest")
+            # Only the folder it was saved for: a new folder starts empty.
+            same_folder = self.archive is not None and stored.get("folder") == str(
+                self.archive.folder
+            )
+            self._gallery_frontier = (
+                dt_util.parse_datetime(newest) if newest and same_folder else None
+            )
+            self._gallery_loaded = True
+        return self._gallery_frontier
+
+    async def _async_set_gallery_frontier(self, newest: datetime | None) -> None:
+        """Record how far back the gallery is fully saved.
+
+        Args:
+            newest: The newest item a complete sync saw, or None after gaps.
+        """
+        self._gallery_loaded = True
+        if newest != self._gallery_frontier:
+            self._gallery_frontier = newest
+            await self._gallery_store.async_save(
+                {
+                    "folder": str(self.archive.folder) if self.archive else None,
+                    "newest": newest.isoformat() if newest else None,
+                }
+            )
+
+    async def _async_sync_gallery_if_due(self) -> None:
+        """Check the gallery every few hours, without failing the poll."""
+        if self.archive is None or (
+            self._gallery_synced is not None
+            and dt_util.utcnow() - self._gallery_synced < GALLERY_SYNC_EVERY
+        ):
+            return
+        try:
+            if saved := await self.async_sync_gallery():
+                LOGGER.info("Archived %s new Bird Buddy gallery files", saved)
+        except (*_REQUEST_ERRORS, OSError) as err:
+            LOGGER.warning("Could not check the Bird Buddy gallery: %s", err)
+            # Try again at the next due time rather than every poll.
+            self._gallery_synced = dt_util.utcnow()
 
     async def _refresh_feed(self) -> None:
         """Process the feed items newer than the saved cursor, then advance it.
@@ -375,6 +524,7 @@ class BirdBuddyDataUpdateCoordinator(DataUpdateCoordinator[BirdBuddy]):
             if not self.first_update:
                 await self._refresh_feed()
                 await self._async_retry_archive()
+                await self._async_sync_gallery_if_due()
         except (AuthenticationFailedError, AuthTokenExpiredError) as exc:
             msg = "Bird Buddy sign-in must be renewed"
             raise ConfigEntryAuthFailed(msg) from exc
