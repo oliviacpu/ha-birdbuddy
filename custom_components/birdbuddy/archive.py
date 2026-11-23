@@ -2,14 +2,18 @@
 
 Bird Buddy's media links are signed and expire after a day, and uncollected
 postcards leave the feed within days, so nothing survives unless it is
-downloaded while the link still works. The archive saves each visit into
-date folders that Home Assistant's Media panel can browse::
+downloaded while the link still works. The archive gives each visit its own
+folder inside a date folder, so Home Assistant's Media panel shows a visit's
+photos and video together::
 
-    <folder>/2026/11/14/08-14-02 American Robin.jpg
-    <folder>/2026/11/14/08-14-02 American Robin 2.mp4
-    <folder>/2026/11/14/08-14-02 American Robin.json
+    <folder>/2026/11/14/08-14-02 American Robin/American Robin.jpg
+    <folder>/2026/11/14/08-14-02 American Robin/American Robin 2.jpg
+    <folder>/2026/11/14/08-14-02 American Robin/American Robin.mp4
+    <folder>/2026/11/14/08-14-02 American Robin/American Robin.json
 
-The JSON file beside a postcard's media holds the species, the confidence,
+Media saved one item at a time (collections, the gallery, the feed) is filed
+the same way, by the time it was taken, so items from the same moment share a
+folder. The JSON file beside a postcard's media holds the species, the confidence,
 the feeder and its files (paths from the archive folder). ``.index.json``
 in the archive folder maps each saved media id, and each postcard's details
 file, to its file, so a visit that turns up again (a later poll, a backfill
@@ -148,7 +152,7 @@ def _media_url(media: Media) -> str | None:
 
 
 class PostcardArchive:
-    """Saves Bird Buddy visits into dated folders."""
+    """Saves each Bird Buddy visit into its own folder, inside dated folders."""
 
     def __init__(self, hass: HomeAssistant, folder: str | Path) -> None:
         """Initialize the archive.
@@ -249,6 +253,18 @@ class PostcardArchive:
         """
         return self.folder / f"{when:%Y}" / f"{when:%m}" / f"{when:%d}"
 
+    def _visit_folder(self, when: datetime, label: str) -> Path:
+        """Return the folder for one visit.
+
+        Args:
+            when: The visit's local time.
+            label: The visit's species label.
+
+        Returns:
+            ``<folder>/YYYY/MM/DD/HH-MM-SS <label>``.
+        """
+        return self._day_folder(when) / f"{when:%H-%M-%S} {label}"
+
     @staticmethod
     def _free_path(folder: Path, stem: str, suffix: str) -> Path:
         """Find a file name in a folder that isn't taken yet (executor).
@@ -329,7 +345,7 @@ class PostcardArchive:
     async def _async_save_media(
         self, medias: list[Media], label: str, when: datetime
     ) -> list[str]:
-        """Save the media not saved before, named after the visit.
+        """Save the media not saved before into the visit's folder.
 
         Args:
             medias: The media of one visit.
@@ -340,8 +356,7 @@ class PostcardArchive:
             The newly written files, relative to the archive folder.
         """
         index = await self._async_index()
-        folder = self._day_folder(when)
-        stem = f"{when:%H-%M-%S} {label}"
+        folder = self._visit_folder(when, label)
         written: list[str] = []
         for media in medias:
             if media.id in index:
@@ -351,7 +366,7 @@ class PostcardArchive:
                 continue
             content, suffix = downloaded
             path = await self._hass.async_add_executor_job(
-                self._write_file, folder, stem, suffix, content
+                self._write_file, folder, label, suffix, content
             )
             rel = path.relative_to(self.folder).as_posix()
             index[media.id] = rel
@@ -406,8 +421,8 @@ class PostcardArchive:
                 else:
                     path = await self._hass.async_add_executor_job(
                         self._write_file,
-                        self._day_folder(when),
-                        f"{when:%H-%M-%S} {label}",
+                        self._visit_folder(when, label),
+                        label,
                         ".json",
                         content,
                     )
