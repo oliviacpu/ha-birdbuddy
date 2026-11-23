@@ -98,7 +98,7 @@ def media_urls(aioclient_mock):
 
 
 async def test_saves_a_postcards_photo_video_and_details(hass, tmp_path, media_urls):
-    """A postcard's media lands in a dated folder, named after the species."""
+    """A postcard's media lands in its own visit folder, named after the species."""
     archive = PostcardArchive(hass, tmp_path)
     analysis = _analysis([_image(), _video()], ["American Robin"])
 
@@ -106,12 +106,14 @@ async def test_saves_a_postcards_photo_video_and_details(hass, tmp_path, media_u
 
     day, time = _local_stem()
     assert written == [
-        f"{day}/{time} American Robin.jpg",
-        f"{day}/{time} American Robin.mp4",
+        f"{day}/{time} American Robin/American Robin.jpg",
+        f"{day}/{time} American Robin/American Robin.mp4",
     ]
     assert (tmp_path / written[0]).read_bytes() == b"jpeg"
     assert (tmp_path / written[1]).read_bytes() == b"mp4"
-    details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
+    details = json.loads(
+        (tmp_path / f"{day}/{time} American Robin/American Robin.json").read_text()
+    )
     assert details["postcard_id"] == "pc1"
     assert details["species"] == ["American Robin"]
     assert details["feeder"] == "Birdhouse"
@@ -121,7 +123,7 @@ async def test_saves_a_postcards_photo_video_and_details(hass, tmp_path, media_u
     assert index == {
         "m1": written[0],
         "v1": written[1],
-        "postcard:pc1": f"{day}/{time} American Robin.json",
+        "postcard:pc1": f"{day}/{time} American Robin/American Robin.json",
     }
 
 
@@ -133,8 +135,9 @@ async def test_a_saved_visit_is_not_saved_twice(hass, tmp_path, media_urls):
     again = await PostcardArchive(hass, tmp_path).async_save_postcard(analysis)
 
     assert again == []
-    day, _ = _local_stem()
-    assert len(list((tmp_path / day).iterdir())) == 2  # one photo, one details file
+    day, time = _local_stem()
+    visit = tmp_path / day / f"{time} American Robin"
+    assert len(list(visit.iterdir())) == 2  # one photo, one details file
 
 
 async def test_two_photos_of_one_visit_get_numbered(hass, tmp_path, aioclient_mock):
@@ -149,18 +152,21 @@ async def test_two_photos_of_one_visit_get_numbered(hass, tmp_path, aioclient_mo
     )
 
     day, time = _local_stem()
-    assert written == [f"{day}/{time} Blue Jay.jpg", f"{day}/{time} Blue Jay 2.jpg"]
+    assert written == [
+        f"{day}/{time} Blue Jay/Blue Jay.jpg",
+        f"{day}/{time} Blue Jay/Blue Jay 2.jpg",
+    ]
 
 
 async def test_an_unrecognized_visitor_and_unsafe_names(hass, tmp_path, media_urls):
     """No species gives "Unknown visitor"; unsafe characters are replaced."""
     archive = PostcardArchive(hass, tmp_path)
     unknown = await archive.async_save_postcard(_analysis([_image("m1")]))
-    assert unknown[0].endswith(f" {UNKNOWN_VISITOR}.jpg")
+    assert unknown[0].endswith(f" {UNKNOWN_VISITOR}/{UNKNOWN_VISITOR}.jpg")
 
     archive2 = PostcardArchive(hass, tmp_path / "other")
     odd = await archive2.async_save_postcard(_analysis([_image("m2")], ["Jay/Crow?"]))
-    assert odd[0].endswith(" Jay-Crow.jpg")
+    assert odd[0].endswith(" Jay-Crow/Jay-Crow.jpg")
 
 
 async def test_an_expired_link_is_skipped(hass, tmp_path, aioclient_mock):
@@ -200,8 +206,8 @@ async def test_saves_a_collection_by_day(hass, tmp_path, aioclient_mock):
     first_day, first_time = _local_stem("2026-11-10T18:00:00.000Z")
     day, time = _local_stem()
     assert written == [
-        f"{first_day}/{first_time} Blue Jay.jpg",
-        f"{day}/{time} Blue Jay.jpg",
+        f"{first_day}/{first_time} Blue Jay/Blue Jay.jpg",
+        f"{day}/{time} Blue Jay/Blue Jay.jpg",
     ]
 
 
@@ -226,7 +232,9 @@ async def test_new_postcards_are_archived_without_listeners(hass, tmp_path, medi
 
     coordinator.client.identify_postcard.assert_awaited_once_with(postcard)
     day, time = _local_stem()
-    details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
+    details = json.loads(
+        (tmp_path / f"{day}/{time} American Robin/American Robin.json").read_text()
+    )
     assert details["feeder"] == "Birdhouse"
 
 
@@ -432,8 +440,10 @@ async def test_a_missing_details_file_is_written_on_retry(hass, tmp_path, media_
 
     assert await archive.async_save_postcard(analysis) == []
     day, time = _local_stem()
-    details = json.loads((tmp_path / f"{day}/{time} American Robin.json").read_text())
-    assert details["files"] == [f"{day}/{time} American Robin.jpg"]
+    details = json.loads(
+        (tmp_path / f"{day}/{time} American Robin/American Robin.json").read_text()
+    )
+    assert details["files"] == [f"{day}/{time} American Robin/American Robin.jpg"]
 
 
 async def test_a_retry_that_saves_more_media_updates_the_details(
@@ -452,13 +462,15 @@ async def test_a_retry_that_saves_more_media_updates_the_details(
     written = await archive.async_save_postcard(analysis)
 
     day, time = _local_stem()
-    assert written == [f"{day}/{time} Blue Jay 2.jpg"]
-    details = json.loads((tmp_path / f"{day}/{time} Blue Jay.json").read_text())
+    assert written == [f"{day}/{time} Blue Jay/Blue Jay 2.jpg"]
+    details = json.loads(
+        (tmp_path / f"{day}/{time} Blue Jay/Blue Jay.json").read_text()
+    )
     assert details["files"] == [
-        f"{day}/{time} Blue Jay.jpg",
-        f"{day}/{time} Blue Jay 2.jpg",
+        f"{day}/{time} Blue Jay/Blue Jay.jpg",
+        f"{day}/{time} Blue Jay/Blue Jay 2.jpg",
     ]
-    assert not list((tmp_path / day).glob("*Blue Jay 2.json"))
+    assert not list((tmp_path / day).rglob("*Blue Jay 2.json"))
 
 
 async def test_a_failed_download_is_retried_on_later_polls(
@@ -488,7 +500,9 @@ async def test_a_failed_download_is_retried_on_later_polls(
     assert hass_storage[key]["data"]["pending"] == {}
     assert len(events) == 1
     day, time = _local_stem()
-    assert (tmp_path / f"{day}/{time} American Robin.jpg").read_bytes() == b"a"
+    assert (
+        tmp_path / f"{day}/{time} American Robin/American Robin.jpg"
+    ).read_bytes() == b"a"
 
 
 async def test_an_old_retry_is_given_up(hass, tmp_path, hass_storage):
@@ -709,8 +723,8 @@ async def test_saves_items_named_by_their_own_species(hass, tmp_path, aioclient_
     march_day, march_time = _local_stem("2026-03-01T15:00:00.000Z")
     day, time = _local_stem()
     assert written == [
-        f"{march_day}/{march_time} {UNKNOWN_VISITOR}.jpg",
-        f"{day}/{time} Blue Jay.jpg",
+        f"{march_day}/{march_time} {UNKNOWN_VISITOR}/{UNKNOWN_VISITOR}.jpg",
+        f"{day}/{time} Blue Jay/Blue Jay.jpg",
     ]
     assert await archive.async_known(["m1", "m2"])
     assert not await archive.async_known(["m1", "m9"])
@@ -732,7 +746,9 @@ async def test_opened_postcards_in_the_feed_are_archived(hass, tmp_path, media_u
     await coordinator._process_feed([collected])
 
     day, time = _local_stem()
-    assert (tmp_path / f"{day}/{time} Northern Cardinal.jpg").read_bytes() == b"jpeg"
+    assert (
+        tmp_path / f"{day}/{time} Northern Cardinal/Northern Cardinal.jpg"
+    ).read_bytes() == b"jpeg"
 
 
 _NEW = "2026-11-14T20:00:00.000Z"

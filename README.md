@@ -139,12 +139,14 @@ Bird Buddy's media links expire after a day, and postcards you don't collect
 leave the feed within days. To keep every visit, set an **Archive folder** in
 the integration's options (**Configure** on the Bird Buddy entry), for example
 `/media/birdbuddy`. Each new postcard is then identified and saved there,
-whether or not you collect it:
+whether or not you collect it. Each visit gets its own folder, so its photos
+and video stay together:
 
 ```text
-/media/birdbuddy/2026/11/14/08-14-02 American Robin.jpg
-/media/birdbuddy/2026/11/14/08-14-02 American Robin.mp4
-/media/birdbuddy/2026/11/14/08-14-02 American Robin.json
+/media/birdbuddy/2026/11/14/08-14-02 American Robin/American Robin.jpg
+/media/birdbuddy/2026/11/14/08-14-02 American Robin/American Robin 2.jpg
+/media/birdbuddy/2026/11/14/08-14-02 American Robin/American Robin.mp4
+/media/birdbuddy/2026/11/14/08-14-02 American Robin/American Robin.json
 ```
 
 The JSON file holds the species, the confidence, the feeder and the visit's

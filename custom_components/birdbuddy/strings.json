@@ -115,7 +115,7 @@
     "step": {
       "init": {
         "title": "Bird Buddy archive",
-        "description": "Every visit's photos, videos and species are saved in this folder, in YYYY/MM/DD folders. Use a folder under /media to browse it in the Media panel. Leave blank to turn the archive off.",
+        "description": "Every visit's photos, videos and species are saved in this folder, one folder per visit inside YYYY/MM/DD folders. Use a folder under /media to browse it in the Media panel. Leave blank to turn the archive off.",
         "data": {
           "archive_folder": "Archive folder"
         },
