@@ -133,6 +133,10 @@ postcard you will need to use the mobile app to open the postcards as
 they arrive. Only opened postcards can be viewed in the Media Browser
 (same as the Collections tab in the Bird Buddy app).
 
+Each species folder holds one folder per visit, newest first, with that
+visit's photos and video. Bird Buddy doesn't say which media came from the
+same visit, so media less than a minute apart are grouped together.
+
 ### Archive
 
 Bird Buddy's media links expire after a day, and postcards you don't collect

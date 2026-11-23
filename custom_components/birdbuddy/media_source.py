@@ -1,6 +1,11 @@
-"""Bird Buddy Media Source."""
+"""Bird Buddy Media Source.
 
-from datetime import datetime
+Browsing goes account > species collection > visit > photos and video. Bird
+Buddy's collections don't say which media came from the same visit, so the
+media are grouped by time: a gap longer than ``VISIT_GAP`` starts a new visit.
+"""
+
+from datetime import datetime, timedelta
 from typing import cast
 
 from birdbuddy.media import Collection, Media
@@ -18,6 +23,12 @@ import homeassistant.util.dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import BirdBuddyDataUpdateCoordinator
+
+# A visit's photos and video arrive within about 15 seconds; separate visits
+# were at least two minutes apart (measured on real collections, 2026-11).
+VISIT_GAP = timedelta(seconds=60)
+# Third identifier part for a visit: VISIT_PREFIX + the id of its first media.
+VISIT_PREFIX = "visit-"
 
 
 class BirdBuddyMediaSource(MediaSource):
@@ -106,7 +117,12 @@ class BirdBuddyMediaSource(MediaSource):
         """
         config_id, collection_id, media_id = self._parse_identifier(item.identifier)
 
-        if not config_id or not collection_id or not media_id:
+        if (
+            not config_id
+            or not collection_id
+            or not media_id
+            or media_id.startswith(VISIT_PREFIX)
+        ):
             msg = f"Incomplete media identifier specified: {item.identifier}"
             raise Unresolvable(msg)
 
@@ -137,7 +153,7 @@ class BirdBuddyMediaSource(MediaSource):
         if item.identifier:
             config = None
             coordinator: BirdBuddyDataUpdateCoordinator | None = None
-            config_id, collection_id, _ = self._parse_identifier(item.identifier)
+            config_id, collection_id, part = self._parse_identifier(item.identifier)
             if config_id:
                 config = self._get_config_or_raise(config_id)
                 coordinator = self.hass.data[DOMAIN][config_id]
@@ -152,6 +168,10 @@ class BirdBuddyMediaSource(MediaSource):
                 ):
                     await coordinator.client.refresh_collections()
                 collection = coordinator.client.collections[collection_id]
+                if part and part.startswith(VISIT_PREFIX):
+                    return await self._build_media_visit_entries(
+                        config, coordinator, collection, part
+                    )
                 return await self._build_media_collection_entries(
                     config, coordinator, collection
                 )
@@ -241,7 +261,7 @@ class BirdBuddyMediaSource(MediaSource):
             title=collection.bird_name,
             can_play=False,
             can_expand=True,
-            children_media_class=MediaClass.IMAGE,
+            children_media_class=MediaClass.DIRECTORY,
             thumbnail=collection.cover_media.thumbnail_url,
         )
 
@@ -251,36 +271,119 @@ class BirdBuddyMediaSource(MediaSource):
         coordinator: BirdBuddyDataUpdateCoordinator,
         collection: Collection,
     ) -> BrowseMediaSource:
-        """Build the media entries for one collection.
+        """Build the visits of one collection, newest first.
 
         Args:
             config: The config entry (account) the collection belongs to.
             coordinator: The coordinator for the account.
-            collection: The collection whose media to list.
+            collection: The collection whose visits to list.
 
         Returns:
-            The collection node populated with its media children.
+            The collection node populated with one folder per visit.
         """
         base = self._build_media_collection(config, collection)
-        base.children = []
         medias = await coordinator.client.collection(collection.collection_id)
-        for media_id, media in medias.items():
-            relative_title = _best_timedelta_title(media.created_at, dt_util.utcnow())
+        now = dt_util.utcnow()
+        base.children = []
+        for visit in reversed(_group_visits(medias)):
+            first_id, first = visit[0]
+            cover = next((m for _, m in visit if not m.is_video), first)
             base.children.append(
                 BrowseMediaSource(
                     domain=DOMAIN,
                     identifier=(
-                        f"{config.entry_id}#{collection.collection_id}#{media_id}"
+                        f"{config.entry_id}#{collection.collection_id}"
+                        f"#{VISIT_PREFIX}{first_id}"
                     ),
-                    media_class=_media_class(media),
-                    media_content_type=_mime_type(media),
-                    title=relative_title,
-                    can_play=media.is_video,
-                    can_expand=media.is_video,
-                    thumbnail=media.thumbnail_url,
+                    media_class=MediaClass.DIRECTORY,
+                    media_content_type=MediaType.IMAGE,
+                    title=_best_timedelta_title(first.created_at, now),
+                    can_play=False,
+                    can_expand=True,
+                    children_media_class=MediaClass.IMAGE,
+                    thumbnail=cover.thumbnail_url,
                 )
             )
         return base
+
+    async def _build_media_visit_entries(
+        self,
+        config: ConfigEntry,
+        coordinator: BirdBuddyDataUpdateCoordinator,
+        collection: Collection,
+        part: str,
+    ) -> BrowseMediaSource:
+        """Build the photos and video of one visit.
+
+        Args:
+            config: The config entry (account) the collection belongs to.
+            coordinator: The coordinator for the account.
+            collection: The collection the visit belongs to.
+            part: The visit's identifier part (``VISIT_PREFIX`` + first media id).
+
+        Returns:
+            The visit node populated with its media.
+
+        Raises:
+            MediaSourceError: If the collection holds no such visit anymore.
+        """
+        medias = await coordinator.client.collection(collection.collection_id)
+        first_id = part.removeprefix(VISIT_PREFIX)
+        visit = next((v for v in _group_visits(medias) if v[0][0] == first_id), None)
+        if visit is None:
+            msg = f"Visit not found in {collection.bird_name}: {part}"
+            raise MediaSourceError(msg)
+        first = visit[0][1]
+        base = BrowseMediaSource(
+            domain=DOMAIN,
+            identifier=f"{config.entry_id}#{collection.collection_id}#{part}",
+            media_class=MediaClass.DIRECTORY,
+            media_content_type=MediaType.IMAGE,
+            title=_best_timedelta_title(first.created_at, dt_util.utcnow()),
+            can_play=False,
+            can_expand=True,
+            children_media_class=MediaClass.IMAGE,
+            thumbnail=first.thumbnail_url,
+        )
+        photos = [(i, m) for i, m in visit if not m.is_video]
+        videos = [(i, m) for i, m in visit if m.is_video]
+        base.children = [
+            self._build_media_item(config, collection, media_id, media, title)
+            for group, word in ((photos, "Photo"), (videos, "Video"))
+            for media_id, media, title in _numbered(group, word)
+        ]
+        return base
+
+    @staticmethod
+    def _build_media_item(
+        config: ConfigEntry,
+        collection: Collection,
+        media_id: str,
+        media: Media,
+        title: str,
+    ) -> BrowseMediaSource:
+        """Build the node for one photo or video.
+
+        Args:
+            config: The config entry (account) the media belongs to.
+            collection: The collection the media belongs to.
+            media_id: The media's id.
+            media: The media.
+            title: The node's title.
+
+        Returns:
+            A playable node for the media.
+        """
+        return BrowseMediaSource(
+            domain=DOMAIN,
+            identifier=f"{config.entry_id}#{collection.collection_id}#{media_id}",
+            media_class=_media_class(media),
+            media_content_type=_mime_type(media),
+            title=title,
+            can_play=media.is_video,
+            can_expand=media.is_video,
+            thumbnail=media.thumbnail_url,
+        )
 
     async def _build_media_collections(
         self,
@@ -318,6 +421,42 @@ async def async_get_media_source(hass: HomeAssistant) -> BirdBuddyMediaSource:
         The Bird Buddy media source.
     """
     return BirdBuddyMediaSource(hass)
+
+
+def _group_visits(medias: dict[str, Media]) -> list[list[tuple[str, Media]]]:
+    """Group a collection's media into visits by time.
+
+    Args:
+        medias: The collection's media, by id.
+
+    Returns:
+        The visits, oldest first; each is its (id, media) pairs, oldest first.
+    """
+    visits: list[list[tuple[str, Media]]] = []
+    last: datetime | None = None
+    for media_id, media in sorted(medias.items(), key=lambda i: i[1].created_at):
+        if last is None or media.created_at - last > VISIT_GAP:
+            visits.append([])
+        visits[-1].append((media_id, media))
+        last = media.created_at
+    return visits
+
+
+def _numbered(
+    group: list[tuple[str, Media]], word: str
+) -> list[tuple[str, Media, str]]:
+    """Title each media of one kind: "Photo" alone, or "Photo 1", "Photo 2"...
+
+    Args:
+        group: The (id, media) pairs of one kind.
+        word: The kind's name.
+
+    Returns:
+        (id, media, title) for each.
+    """
+    if len(group) == 1:
+        return [(group[0][0], group[0][1], word)]
+    return [(i, m, f"{word} {n}") for n, (i, m) in enumerate(group, 1)]
 
 
 def _media_class(media: Media) -> MediaClass:
