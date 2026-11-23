@@ -21,6 +21,7 @@ from custom_components.birdbuddy.const import DOMAIN
 from custom_components.birdbuddy.media_source import (
     BirdBuddyMediaSource,
     _best_timedelta_title,
+    _group_visits,
     _media_class,
     _mime_type,
     async_get_media_source,
@@ -196,22 +197,80 @@ async def test_browse_account_lists_collections(hass):
     assert result.children[0].title == "American Robin"
 
 
-async def test_browse_collection_lists_media(hass):
-    """Browsing a collection lists its media as playable children."""
+def _at(media: dict, media_id: str, taken: str) -> Media:
+    """Copy a media dict with another id and time."""
+    return Media({**media, "id": media_id, "createdAt": taken})
+
+
+# Two visits: three photos and a video within 15 s, then one photo 2 min later.
+_TWO_VISITS = {
+    "p1": _at(_IMG, "p1", "2026-11-18T19:47:59.000Z"),
+    "p2": _at(_IMG, "p2", "2026-11-18T19:47:59.000Z"),
+    "v1": _at(_VID, "v1", "2026-11-18T19:48:07.000Z"),
+    "p3": _at(_IMG, "p3", "2026-11-18T19:48:10.000Z"),
+    "q1": _at(_IMG, "q1", "2026-11-18T19:50:10.000Z"),
+}
+
+
+def test_group_visits_splits_on_a_gap():
+    """Media closer than a minute share a visit; a longer gap starts a new one."""
+    visits = _group_visits(dict(reversed(list(_TWO_VISITS.items()))))
+    assert [[i for i, _ in v] for v in visits] == [["p2", "p1", "v1", "p3"], ["q1"]]
+
+
+async def test_browse_collection_lists_visits_newest_first(hass):
+    """Browsing a collection lists one folder per visit, newest first."""
     source, _, _ = _make_source(
-        hass,
-        collections={"col1": Collection(_COL)},
-        collection_media={"m1": Media(_IMG), "m2": Media(_VID)},
+        hass, collections={"col1": Collection(_COL)}, collection_media=_TWO_VISITS
     )
     result = await source.async_browse_media(_item(hass, "cfg#col1"))
     assert _child_content_ids(result) == [
-        f"{URI_SCHEME}{DOMAIN}/cfg#col1#m1",
-        f"{URI_SCHEME}{DOMAIN}/cfg#col1#m2",
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#visit-q1",
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#visit-p1",
     ]
     assert result.children is not None
-    video_child = result.children[1]
-    assert video_child.can_play is True
-    assert video_child.media_content_type == "video/mp4"
+    assert all(c.can_expand and not c.can_play for c in result.children)
+    assert result.children[1].thumbnail == "https://example.invalid/t1.jpg"
+
+
+async def test_browse_visit_lists_photos_then_video(hass):
+    """A visit holds its photos, numbered, then its video."""
+    source, _, _ = _make_source(
+        hass, collections={"col1": Collection(_COL)}, collection_media=_TWO_VISITS
+    )
+    result = await source.async_browse_media(_item(hass, "cfg#col1#visit-p1"))
+    assert _child_content_ids(result) == [
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#p1",
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#p2",
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#p3",
+        f"{URI_SCHEME}{DOMAIN}/cfg#col1#v1",
+    ]
+    assert result.children is not None
+    assert [c.title for c in result.children] == [
+        "Photo 1",
+        "Photo 2",
+        "Photo 3",
+        "Video",
+    ]
+    video = result.children[3]
+    assert video.can_play is True
+    assert video.media_content_type == "video/mp4"
+
+
+async def test_browse_a_visit_that_is_gone_raises(hass):
+    """A visit no longer in the collection raises MediaSourceError."""
+    source, _, _ = _make_source(
+        hass, collections={"col1": Collection(_COL)}, collection_media=_TWO_VISITS
+    )
+    with pytest.raises(MediaSourceError):
+        await source.async_browse_media(_item(hass, "cfg#col1#visit-gone"))
+
+
+async def test_a_visit_is_not_playable(hass):
+    """Resolving a visit folder, not a media item, is unresolvable."""
+    source, _, _ = _make_source(hass, collection_media=_TWO_VISITS)
+    with pytest.raises(Unresolvable):
+        await source.async_resolve_media(_item(hass, "cfg#col1#visit-p1"))
 
 
 async def test_browse_unknown_config_raises(hass):
